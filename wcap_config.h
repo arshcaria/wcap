@@ -874,9 +874,9 @@ void Config_Defaults(Config* C)
 		.AudioSamplerate = 48000,
 		.AudioBitrate = 160,
 		// shortcuts
-		.ShortcutMonitor = HOT_KEY(VK_SNAPSHOT, MOD_CONTROL),
-		.ShortcutWindow = HOT_KEY(VK_SNAPSHOT, MOD_CONTROL | MOD_WIN),
-		.ShortcutRegion = HOT_KEY(VK_SNAPSHOT, MOD_CONTROL | MOD_SHIFT),
+		.ShortcutMonitor = HOT_KEY('U', MOD_CONTROL | MOD_WIN | MOD_ALT),
+		.ShortcutWindow  = HOT_KEY('I', MOD_CONTROL | MOD_WIN | MOD_ALT),
+		.ShortcutRegion  = HOT_KEY('O', MOD_CONTROL | MOD_WIN | MOD_ALT),
 	};
 
 	LPWSTR VideoFolder;
