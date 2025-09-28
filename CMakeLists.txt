@@ -88,6 +88,11 @@ target_compile_definitions(wcap PRIVATE
         $<$<CONFIG:Release>:NDEBUG>
 )
 
+# --- 修正点: 强制 MSVC 以 UTF-8 编译 ---
+if(MSVC)
+  target_compile_options(wcap PRIVATE /utf-8)
+endif()
+
 # --- 修正点: 调整链接选项以避免重复的清单 ---
 target_link_options(wcap PRIVATE
         /SUBSYSTEM:WINDOWS
