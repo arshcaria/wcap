@@ -1,4 +1,5 @@
 .vs
+.idea
 *.ini
 *.exe
 *.pdb
@@ -6,3 +7,5 @@
 *.exp
 shaders
 
+/out
+/cmake-build-debug
