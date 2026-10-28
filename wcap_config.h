@@ -895,7 +895,7 @@ void Config_Defaults(Config* C)
 
 	LPWSTR VideoFolder;
 	HR(SHGetKnownFolderPath(&FOLDERID_Videos, KF_FLAG_DEFAULT, NULL, &VideoFolder));
-	StrCpyNW(C->OutputFolder, VideoFolder, _countof(C->OutputFolder));
+	PathCombineW(C->OutputFolder, VideoFolder, L"wcap_video");
 	CoTaskMemFree(VideoFolder);
 }
 
