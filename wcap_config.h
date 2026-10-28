@@ -51,6 +51,12 @@ typedef struct
 	DWORD VideoBitrate;
 	DWORD VideoRateControl;
 	DWORD VideoQuality;
+	// crop
+	BOOL EnableCrop;
+	DWORD CropX;
+	DWORD CropY;
+	DWORD CropWidth;
+	DWORD CropHeight;
 	// audio
 	BOOL CaptureAudio;
 	BOOL ApplicationLocalAudio;
@@ -125,6 +131,12 @@ static BOOL Config_ShowDialog(Config* C);
 #define ID_AUDIO_SAMPLERATE        340
 #define ID_AUDIO_BITRATE           350
 
+#define ID_CROP                    500
+#define ID_CROP_X                  510
+#define ID_CROP_Y                  520
+#define ID_CROP_WIDTH              530
+#define ID_CROP_HEIGHT             540
+
 #define ID_SHORTCUT_MONITOR        400
 #define ID_SHORTCUT_WINDOW         410
 #define ID_SHORTCUT_REGION         420
@@ -151,7 +163,8 @@ static BOOL Config_ShowDialog(Config* C);
 #define COL10W 144
 #define COL11W 130
 #define ROW0H 98
-#define ROW1H 166
+#define ROW1H 182
+#define ROW1AH 96 // audio group height, crop group gets the rest of ROW1H
 #define ROW2H 56
 
 #define PADDING 4             // padding for dialog and group boxes
@@ -363,6 +376,13 @@ static void Config__SetDialogValues(HWND Window, Config* C)
 	SendDlgItemMessageW(Window, ID_VIDEO_RATE_CONTROL, CB_SETCURSEL, C->VideoRateControl, 0);
 	SetDlgItemInt(Window, ID_VIDEO_QUALITY,       C->VideoQuality,      FALSE);
 
+	// crop
+	CheckDlgButton(Window, ID_CROP,       C->EnableCrop);
+	SetDlgItemInt(Window, ID_CROP_X,      C->CropX,      FALSE);
+	SetDlgItemInt(Window, ID_CROP_Y,      C->CropY,      FALSE);
+	SetDlgItemInt(Window, ID_CROP_WIDTH,  C->CropWidth,  FALSE);
+	SetDlgItemInt(Window, ID_CROP_HEIGHT, C->CropHeight, FALSE);
+
 	// audio
 	CheckDlgButton(Window, ID_AUDIO_CAPTURE, C->CaptureAudio);
 	CheckDlgButton(Window, ID_AUDIO_APPLICATION_LOCAL, C->ApplicationLocalAudio);
@@ -400,6 +420,10 @@ static void Config__SetDialogValues(HWND Window, Config* C)
 	EnableWindow(GetDlgItem(Window, ID_VIDEO_MAX_HEIGHT), !C->UseOriginalSize);
 	EnableWindow(GetDlgItem(Window, ID_VIDEO_QUALITY),    C->VideoRateControl == CONFIG_VIDEO_RC_QUALITY);
 	EnableWindow(GetDlgItem(Window, ID_VIDEO_BITRATE),    C->VideoRateControl == CONFIG_VIDEO_RC_VBR);
+	EnableWindow(GetDlgItem(Window, ID_CROP_X),           C->EnableCrop);
+	EnableWindow(GetDlgItem(Window, ID_CROP_Y),           C->EnableCrop);
+	EnableWindow(GetDlgItem(Window, ID_CROP_WIDTH),       C->EnableCrop);
+	EnableWindow(GetDlgItem(Window, ID_CROP_HEIGHT),      C->EnableCrop);
 
 	EnableWindow(GetDlgItem(Window, ID_MOUSE_CURSOR),              ScreenCapture_CanHideMouseCursor());
 	EnableWindow(GetDlgItem(Window, ID_SHOW_RECORDING_BORDER),     ScreenCapture_CanHideRecordingBorder());
@@ -539,6 +563,12 @@ static LRESULT CALLBACK Config__DialogProc(HWND Window, UINT Message, WPARAM WPa
 			C->VideoBitrate            = GetDlgItemInt(Window, ID_VIDEO_BITRATE,       NULL, FALSE);
 			C->VideoRateControl        = (DWORD)SendDlgItemMessageW(Window, ID_VIDEO_RATE_CONTROL, CB_GETCURSEL, 0, 0);
 			C->VideoQuality            = min(GetDlgItemInt(Window, ID_VIDEO_QUALITY, NULL, FALSE), 100);
+			// crop
+			C->EnableCrop = IsDlgButtonChecked(Window, ID_CROP);
+			C->CropX      = GetDlgItemInt(Window, ID_CROP_X,      NULL, FALSE);
+			C->CropY      = GetDlgItemInt(Window, ID_CROP_Y,      NULL, FALSE);
+			C->CropWidth  = GetDlgItemInt(Window, ID_CROP_WIDTH,  NULL, FALSE);
+			C->CropHeight = GetDlgItemInt(Window, ID_CROP_HEIGHT, NULL, FALSE);
 			// audio
 			C->CaptureAudio          = IsDlgButtonChecked(Window, ID_AUDIO_CAPTURE);
 			C->ApplicationLocalAudio = IsDlgButtonChecked(Window, ID_AUDIO_APPLICATION_LOCAL);
@@ -614,6 +644,15 @@ static LRESULT CALLBACK Config__DialogProc(HWND Window, UINT Message, WPARAM WPa
 			BOOL UseOriginalSize = (BOOL)SendDlgItemMessageW(Window, ID_VIDEO_ORIGINAL_SIZE, BM_GETCHECK, 0, 0);
 			EnableWindow(GetDlgItem(Window, ID_VIDEO_MAX_WIDTH),  !UseOriginalSize);
 			EnableWindow(GetDlgItem(Window, ID_VIDEO_MAX_HEIGHT), !UseOriginalSize);
+			return TRUE;
+		}
+		else if (Control == ID_CROP && HIWORD(WParam) == BN_CLICKED)
+		{
+			BOOL EnableCrop = (BOOL)SendDlgItemMessageW(Window, ID_CROP, BM_GETCHECK, 0, 0);
+			EnableWindow(GetDlgItem(Window, ID_CROP_X),      EnableCrop);
+			EnableWindow(GetDlgItem(Window, ID_CROP_Y),      EnableCrop);
+			EnableWindow(GetDlgItem(Window, ID_CROP_WIDTH),  EnableCrop);
+			EnableWindow(GetDlgItem(Window, ID_CROP_HEIGHT), EnableCrop);
 			return TRUE;
 		}
 		else if (Control == ID_OUTPUT_FOLDER + 1)
@@ -912,6 +951,12 @@ void Config_Defaults(Config* C)
 		.VideoBitrate = 8000,
 		.VideoRateControl = CONFIG_VIDEO_RC_QUALITY,
 		.VideoQuality = 60,
+		// crop
+		.EnableCrop = FALSE,
+		.CropX = 2,
+		.CropY = 120,
+		.CropWidth = 1920,
+		.CropHeight = 1080,
 		// audio
 		.CaptureAudio = TRUE,
 		.ApplicationLocalAudio = TRUE,
@@ -1027,6 +1072,12 @@ void Config_Load(Config* C, LPCWSTR FileName)
 	Config__GetStr(FileName, L"VideoRateControl",         &C->VideoRateControl,  gVideoRateControls);
 	Config__GetInt(FileName, L"VideoQuality",             &C->VideoQuality,      NULL);
 	C->VideoQuality = min(C->VideoQuality, 100);
+	// crop
+	Config__GetBool(FileName, L"EnableCrop", &C->EnableCrop);
+	Config__GetInt(FileName,  L"CropX",      &C->CropX,      NULL);
+	Config__GetInt(FileName,  L"CropY",      &C->CropY,      NULL);
+	Config__GetInt(FileName,  L"CropWidth",  &C->CropWidth,  NULL);
+	Config__GetInt(FileName,  L"CropHeight", &C->CropHeight, NULL);
 	// audio
 	Config__GetBool(FileName, L"CaptureAudio",          &C->CaptureAudio);
 	Config__GetBool(FileName, L"ApplicationLocalAudio", &C->ApplicationLocalAudio);
@@ -1079,6 +1130,12 @@ void Config_Save(Config* C, LPCWSTR FileName)
 	Config__WriteInt(FileName, L"VideoBitrate",      C->VideoBitrate);
 	WritePrivateProfileStringW(INI_SECTION, L"VideoRateControl", gVideoRateControls[C->VideoRateControl], FileName);
 	Config__WriteInt(FileName, L"VideoQuality",      C->VideoQuality);
+	// crop
+	WritePrivateProfileStringW(INI_SECTION, L"EnableCrop", C->EnableCrop ? L"1" : L"0", FileName);
+	Config__WriteInt(FileName, L"CropX",      C->CropX);
+	Config__WriteInt(FileName, L"CropY",      C->CropY);
+	Config__WriteInt(FileName, L"CropWidth",  C->CropWidth);
+	Config__WriteInt(FileName, L"CropHeight", C->CropHeight);
 	// audio
 	WritePrivateProfileStringW(INI_SECTION, L"CaptureAudio",          C->CaptureAudio          ? L"1" : L"0", FileName);
 	WritePrivateProfileStringW(INI_SECTION, L"ApplicationLocalAudio", C->ApplicationLocalAudio ? L"1" : L"0", FileName);
@@ -1155,7 +1212,7 @@ BOOL Config_ShowDialog(Config* C)
 			},
 			{
 				.Caption = "&Audio",
-				.Rect = { COL10W + PADDING, ROW0H, COL11W, ROW1H },
+				.Rect = { COL10W + PADDING, ROW0H, COL11W, ROW1AH },
 				.Items = (Config__DialogItem[])
 				{
 					{ "Capture Au&dio",           ID_AUDIO_CAPTURE,           ITEM_CHECKBOX     },
@@ -1164,6 +1221,19 @@ BOOL Config_ShowDialog(Config* C)
 					{ "Channels",                 ID_AUDIO_CHANNELS,          ITEM_COMBOBOX, 60 },
 					{ "Samplerate",               ID_AUDIO_SAMPLERATE,        ITEM_COMBOBOX, 60 },
 					{ "Bitrate (kbit/s)",         ID_AUDIO_BITRATE,           ITEM_COMBOBOX, 60 },
+					{ NULL },
+				},
+			},
+			{
+				.Caption = "Crop",
+				.Rect = { COL10W + PADDING, ROW0H + ROW1AH + PADDING, COL11W, ROW1H - ROW1AH - PADDING },
+				.Items = (Config__DialogItem[])
+				{
+					{ "Crop Window Capt&ure", ID_CROP,        ITEM_CHECKBOX   },
+					{ "Left (X)",             ID_CROP_X,      ITEM_NUMBER, 60 },
+					{ "Top (Y)",              ID_CROP_Y,      ITEM_NUMBER, 60 },
+					{ "Width (0 = all)",      ID_CROP_WIDTH,  ITEM_NUMBER, 60 },
+					{ "Height (0 = all)",     ID_CROP_HEIGHT, ITEM_NUMBER, 60 },
 					{ NULL },
 				},
 			},
@@ -1182,7 +1252,7 @@ BOOL Config_ShowDialog(Config* C)
 		},
 	};
 
-	BYTE __declspec(align(4)) Data[4096];
+	BYTE __declspec(align(4)) Data[8192];
 	Config__DoDialogLayout(&Dialog, Data, sizeof(Data));
 
 	return (BOOL)DialogBoxIndirectParamW(GetModuleHandleW(NULL), (LPCDLGTEMPLATEW)Data, NULL, Config__DialogProc, (LPARAM)C);

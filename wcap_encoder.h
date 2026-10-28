@@ -857,10 +857,11 @@ BOOL Encoder_NewFrame(Encoder* Encoder, ID3D11Texture2D* Texture, RECT Rect, UIN
 		{
 			FLOAT Black[] = { 0, 0, 0, 0 };
 			ID3D11DeviceContext_ClearRenderTargetView(Context, Encoder->InputView, Black);
-
-			Box.right = Box.left + min(Encoder->InputWidth, Box.right);
-			Box.bottom = Box.top + min(Encoder->InputHeight, Box.bottom);
 		}
+
+		// never copy more than input texture size
+		Box.right = Box.left + min(Encoder->InputWidth, Width);
+		Box.bottom = Box.top + min(Encoder->InputHeight, Height);
 		ID3D11DeviceContext_CopySubresourceRegion(Context, (ID3D11Resource*)Encoder->Resize.InputTexture, 0, 0, 0, 0, (ID3D11Resource*)Texture, 0, &Box);
 	}
 

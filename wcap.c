@@ -99,6 +99,7 @@ static UINT64 gRecordingNextEncode;
 static UINT64 gRecordingNextTooltip;
 static EXECUTION_STATE gRecordingState;
 static WCHAR gRecordingPath[MAX_PATH];
+static BOOL gRecordingCrop;
 
 // when selecting rectangle to record
 static HMONITOR gRectMonitor;
@@ -196,6 +197,25 @@ static void ShowFileInFolder(LPCWSTR Filename)
 	}
 }
 
+// crop rect relative to captured window, clamped to its size
+static RECT CropRect(RECT Rect)
+{
+	if (gRecordingCrop)
+	{
+		Rect.left = min(Rect.left + (LONG)gConfig.CropX, Rect.right);
+		Rect.top = min(Rect.top + (LONG)gConfig.CropY, Rect.bottom);
+		if (gConfig.CropWidth != 0)
+		{
+			Rect.right = min(Rect.right, Rect.left + (LONG)gConfig.CropWidth);
+		}
+		if (gConfig.CropHeight != 0)
+		{
+			Rect.bottom = min(Rect.bottom, Rect.top + (LONG)gConfig.CropHeight);
+		}
+	}
+	return Rect;
+}
+
 static void StartRecording(ID3D11Device* Device, HWND Window)
 {
 	SYSTEMTIME Time;
@@ -233,10 +253,20 @@ static void StartRecording(ID3D11Device* Device, HWND Window)
 		gRecordingLimitFramerate = 0;
 	}
 
+	// crop only window capture, region capture is already cropped
+	gRecordingCrop = Window != NULL && gConfig.EnableCrop;
+	RECT Rect = CropRect(gCapture.Rect);
+	if (Rect.right == Rect.left || Rect.bottom == Rect.top)
+	{
+		// window is too small for crop offset, record whole window
+		gRecordingCrop = FALSE;
+		Rect = gCapture.Rect;
+	}
+
 	EncoderConfig EncConfig =
 	{
-		.Width = gCapture.Rect.right - gCapture.Rect.left,
-		.Height = gCapture.Rect.bottom - gCapture.Rect.top,
+		.Width = Rect.right - Rect.left,
+		.Height = Rect.bottom - Rect.top,
 		.FramerateNum = FramerateNum,
 		.FramerateDen = FramerateDen,
 		.Config = &gConfig,
@@ -1318,7 +1348,7 @@ static bool OnCaptureFrame(ScreenCapture* Capture, ScreenCaptureFrame* Frame)
 
 	if (DoEncode)
 	{
-		if (!Encoder_NewFrame(&gEncoder, Frame->Texture, Frame->Rect, Frame->Time, gTickFreq.QuadPart))
+		if (!Encoder_NewFrame(&gEncoder, Frame->Texture, CropRect(Frame->Rect), Frame->Time, gTickFreq.QuadPart))
 		{
 			// TODO: maybe highlight tray icon when droppped frames are increasing too much?
 			gRecordingDroppedFrames++;
