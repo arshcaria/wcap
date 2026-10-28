@@ -15,6 +15,9 @@
 #define CONFIG_VIDEO_HIGH    2
 #define CONFIG_VIDEO_MAIN_10 3
 
+#define CONFIG_VIDEO_RC_QUALITY 0
+#define CONFIG_VIDEO_RC_VBR     1
+
 #define CONFIG_AUDIO_AAC  0
 #define CONFIG_AUDIO_FLAC 1
 
@@ -46,6 +49,8 @@ typedef struct
 	DWORD VideoMaxHeight;
 	DWORD VideoMaxFramerate;
 	DWORD VideoBitrate;
+	DWORD VideoRateControl;
+	DWORD VideoQuality;
 	// audio
 	BOOL CaptureAudio;
 	BOOL ApplicationLocalAudio;
@@ -110,6 +115,8 @@ static BOOL Config_ShowDialog(Config* C);
 #define ID_VIDEO_MAX_HEIGHT        250
 #define ID_VIDEO_MAX_FRAMERATE     260
 #define ID_VIDEO_BITRATE           270
+#define ID_VIDEO_RATE_CONTROL      280
+#define ID_VIDEO_QUALITY           290
 
 #define ID_AUDIO_CAPTURE           300
 #define ID_AUDIO_APPLICATION_LOCAL 310
@@ -144,7 +151,7 @@ static BOOL Config_ShowDialog(Config* C);
 #define COL10W 144
 #define COL11W 130
 #define ROW0H 98
-#define ROW1H 138
+#define ROW1H 166
 #define ROW2H 56
 
 #define PADDING 4             // padding for dialog and group boxes
@@ -158,6 +165,7 @@ static const DWORD gAudioSamplerates[] = { 44100, 48000, 0 };
 
 static const LPCWSTR gVideoCodecs[] = { L"H264", L"H265", L"AV1", NULL};
 static const LPCWSTR gVideoProfiles[] = { L"Base", L"Main", L"High", L"Main10", NULL };
+static const LPCWSTR gVideoRateControls[] = { L"Quality", L"VBR", NULL };
 static const LPCWSTR gAudioCodecs[] = { L"AAC", L"FLAC", NULL };
 
 static const int gValidVideoProfiles[][4] =
@@ -352,6 +360,8 @@ static void Config__SetDialogValues(HWND Window, Config* C)
 	SetDlgItemInt(Window, ID_VIDEO_MAX_HEIGHT,    C->VideoMaxHeight,    FALSE);
 	SetDlgItemInt(Window, ID_VIDEO_MAX_FRAMERATE, C->VideoMaxFramerate, FALSE);
 	SetDlgItemInt(Window, ID_VIDEO_BITRATE,       C->VideoBitrate,      FALSE);
+	SendDlgItemMessageW(Window, ID_VIDEO_RATE_CONTROL, CB_SETCURSEL, C->VideoRateControl, 0);
+	SetDlgItemInt(Window, ID_VIDEO_QUALITY,       C->VideoQuality,      FALSE);
 
 	// audio
 	CheckDlgButton(Window, ID_AUDIO_CAPTURE, C->CaptureAudio);
@@ -388,6 +398,8 @@ static void Config__SetDialogValues(HWND Window, Config* C)
 	EnableWindow(GetDlgItem(Window, ID_LIMIT_SIZE + 1),   C->EnableLimitSize);
 	EnableWindow(GetDlgItem(Window, ID_VIDEO_MAX_WIDTH),  !C->UseOriginalSize);
 	EnableWindow(GetDlgItem(Window, ID_VIDEO_MAX_HEIGHT), !C->UseOriginalSize);
+	EnableWindow(GetDlgItem(Window, ID_VIDEO_QUALITY),    C->VideoRateControl == CONFIG_VIDEO_RC_QUALITY);
+	EnableWindow(GetDlgItem(Window, ID_VIDEO_BITRATE),    C->VideoRateControl == CONFIG_VIDEO_RC_VBR);
 
 	EnableWindow(GetDlgItem(Window, ID_MOUSE_CURSOR),              ScreenCapture_CanHideMouseCursor());
 	EnableWindow(GetDlgItem(Window, ID_SHOW_RECORDING_BORDER),     ScreenCapture_CanHideRecordingBorder());
@@ -466,6 +478,9 @@ static LRESULT CALLBACK Config__DialogProc(HWND Window, UINT Message, WPARAM WPa
 		SendDlgItemMessageW(Window, ID_VIDEO_CODEC, CB_ADDSTRING, 0, (LPARAM)L"H265 / HEVC");
 		SendDlgItemMessageW(Window, ID_VIDEO_CODEC, CB_ADDSTRING, 0, (LPARAM)L"AV1");
 
+		SendDlgItemMessageW(Window, ID_VIDEO_RATE_CONTROL, CB_ADDSTRING, 0, (LPARAM)L"Quality");
+		SendDlgItemMessageW(Window, ID_VIDEO_RATE_CONTROL, CB_ADDSTRING, 0, (LPARAM)L"VBR");
+
 		SendDlgItemMessageW(Window, ID_AUDIO_CODEC, CB_ADDSTRING, 0, (LPARAM)L"AAC");
 		SendDlgItemMessageW(Window, ID_AUDIO_CODEC, CB_ADDSTRING, 0, (LPARAM)L"FLAC");
 
@@ -522,6 +537,8 @@ static LRESULT CALLBACK Config__DialogProc(HWND Window, UINT Message, WPARAM WPa
 			C->VideoMaxHeight          = GetDlgItemInt(Window, ID_VIDEO_MAX_HEIGHT,    NULL, FALSE);
 			C->VideoMaxFramerate       = GetDlgItemInt(Window, ID_VIDEO_MAX_FRAMERATE, NULL, FALSE);
 			C->VideoBitrate            = GetDlgItemInt(Window, ID_VIDEO_BITRATE,       NULL, FALSE);
+			C->VideoRateControl        = (DWORD)SendDlgItemMessageW(Window, ID_VIDEO_RATE_CONTROL, CB_GETCURSEL, 0, 0);
+			C->VideoQuality            = min(GetDlgItemInt(Window, ID_VIDEO_QUALITY, NULL, FALSE), 100);
 			// audio
 			C->CaptureAudio          = IsDlgButtonChecked(Window, ID_AUDIO_CAPTURE);
 			C->ApplicationLocalAudio = IsDlgButtonChecked(Window, ID_AUDIO_APPLICATION_LOCAL);
@@ -562,6 +579,13 @@ static LRESULT CALLBACK Config__DialogProc(HWND Window, UINT Message, WPARAM WPa
 		{
 			LRESULT Index = SendDlgItemMessageW(Window, ID_VIDEO_CODEC, CB_GETCURSEL, 0, 0);
 			Config__UpdateVideoProfiles(Window, (DWORD)Index);
+			return TRUE;
+		}
+		else if (Control == ID_VIDEO_RATE_CONTROL && HIWORD(WParam) == CBN_SELCHANGE)
+		{
+			LRESULT Index = SendDlgItemMessageW(Window, ID_VIDEO_RATE_CONTROL, CB_GETCURSEL, 0, 0);
+			EnableWindow(GetDlgItem(Window, ID_VIDEO_QUALITY), Index == CONFIG_VIDEO_RC_QUALITY);
+			EnableWindow(GetDlgItem(Window, ID_VIDEO_BITRATE), Index == CONFIG_VIDEO_RC_VBR);
 			return TRUE;
 		}
 		else if (Control == ID_AUDIO_CODEC && HIWORD(WParam) == CBN_SELCHANGE)
@@ -886,6 +910,8 @@ void Config_Defaults(Config* C)
 		.VideoMaxHeight = 1080,
 		.VideoMaxFramerate = 60,
 		.VideoBitrate = 8000,
+		.VideoRateControl = CONFIG_VIDEO_RC_QUALITY,
+		.VideoQuality = 60,
 		// audio
 		.CaptureAudio = TRUE,
 		.ApplicationLocalAudio = TRUE,
@@ -998,6 +1024,9 @@ void Config_Load(Config* C, LPCWSTR FileName)
 	Config__GetInt(FileName, L"VideoMaxHeight",           &C->VideoMaxHeight,    NULL);
 	Config__GetInt(FileName, L"VideoMaxFramerate",        &C->VideoMaxFramerate, NULL);
 	Config__GetInt(FileName, L"VideoBitrate",             &C->VideoBitrate,      NULL);
+	Config__GetStr(FileName, L"VideoRateControl",         &C->VideoRateControl,  gVideoRateControls);
+	Config__GetInt(FileName, L"VideoQuality",             &C->VideoQuality,      NULL);
+	C->VideoQuality = min(C->VideoQuality, 100);
 	// audio
 	Config__GetBool(FileName, L"CaptureAudio",          &C->CaptureAudio);
 	Config__GetBool(FileName, L"ApplicationLocalAudio", &C->ApplicationLocalAudio);
@@ -1048,6 +1077,8 @@ void Config_Save(Config* C, LPCWSTR FileName)
 	Config__WriteInt(FileName, L"VideoMaxHeight",    C->VideoMaxHeight);
 	Config__WriteInt(FileName, L"VideoMaxFramerate", C->VideoMaxFramerate);
 	Config__WriteInt(FileName, L"VideoBitrate",      C->VideoBitrate);
+	WritePrivateProfileStringW(INI_SECTION, L"VideoRateControl", gVideoRateControls[C->VideoRateControl], FileName);
+	Config__WriteInt(FileName, L"VideoQuality",      C->VideoQuality);
 	// audio
 	WritePrivateProfileStringW(INI_SECTION, L"CaptureAudio",          C->CaptureAudio          ? L"1" : L"0", FileName);
 	WritePrivateProfileStringW(INI_SECTION, L"ApplicationLocalAudio", C->ApplicationLocalAudio ? L"1" : L"0", FileName);
@@ -1110,12 +1141,14 @@ BOOL Config_ShowDialog(Config* C)
 				{
 					{ "&Gamma Correct Resize",      ID_VIDEO_GAMMA_RESIZE ,    ITEM_CHECKBOX     },
 					{ "&Improved Color Conversion", ID_VIDEO_IMPROVED_CONVERT, ITEM_CHECKBOX     },
-					{ "&Original Size",             ID_VIDEO_ORIGINAL_SIZE,    ITEM_CHECKBOX     },
+					{ "Original Si&ze",             ID_VIDEO_ORIGINAL_SIZE,    ITEM_CHECKBOX     },
 					{ "Codec",                      ID_VIDEO_CODEC,            ITEM_COMBOBOX, 64 },
 					{ "Profile",                    ID_VIDEO_PROFILE,          ITEM_COMBOBOX, 64 },
 					{ "Max &Width",                 ID_VIDEO_MAX_WIDTH,        ITEM_NUMBER,   64 },
 					{ "Max &Height",                ID_VIDEO_MAX_HEIGHT,       ITEM_NUMBER,   64 },
 					{ "Max &Framerate",             ID_VIDEO_MAX_FRAMERATE,    ITEM_NUMBER,   64 },
+					{ "Rate Control",               ID_VIDEO_RATE_CONTROL,     ITEM_COMBOBOX, 64 },
+					{ "&Quality (0-100)",           ID_VIDEO_QUALITY,          ITEM_NUMBER,   64 },
 					{ "Bitrate (kbit/s)",           ID_VIDEO_BITRATE,          ITEM_NUMBER,   64 },
 					{ NULL },
 				},

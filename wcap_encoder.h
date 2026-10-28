@@ -498,6 +498,14 @@ BOOL Encoder_Start(Encoder* Encoder, ID3D11Device* Device, LPWSTR FileName, cons
 		}
 	}
 
+	// video encoder parameters
+	BOOL UseQuality = Config->Config->VideoRateControl == CONFIG_VIDEO_RC_QUALITY;
+	UINT32 RateControl = UseQuality ? eAVEncCommonRateControlMode_Quality : eAVEncCommonRateControlMode_UnconstrainedVBR;
+	UINT32 Quality = Config->Config->VideoQuality;
+	UINT32 Bitrate = Config->Config->VideoBitrate * 1000;
+	UINT32 GopSize = MUL_DIV_ROUND_UP(8, Config->FramerateNum, Config->FramerateDen); // 8 seconds
+	UINT32 Bframes = 2; // for better compression
+
 	// video input type, NV12 or P010 format
 	{
 		IMFMediaType* Type;
@@ -508,7 +516,30 @@ BOOL Encoder_Start(Encoder* Encoder, ID3D11Device* Device, LPWSTR FileName, cons
 		HR(IMFMediaType_SetUINT64(Type, &MF_MT_FRAME_RATE, MFT64(Config->FramerateNum, Config->FramerateDen)));
 		HR(IMFMediaType_SetUINT64(Type, &MF_MT_FRAME_SIZE, MFT64(OutputWidth, OutputHeight)));
 
-		hr = IMFSinkWriter_SetInputMediaType(Writer, Encoder->VideoStreamIndex, Type, NULL);
+		// encoder parameters must be passed here, when encoder gets created - NVIDIA MFT encoder reports
+		// success when they are set later with ICodecAPI, but silently ignores rate control & GOP size
+		IMFAttributes* Params;
+		HR(MFCreateAttributes(&Params, 5));
+		HR(IMFAttributes_SetUINT32(Params, &CODECAPI_AVEncCommonRateControlMode, RateControl));
+		if (UseQuality)
+		{
+			HR(IMFAttributes_SetUINT32(Params, &CODECAPI_AVEncCommonQuality, Quality));
+		}
+		else
+		{
+			HR(IMFAttributes_SetUINT32(Params, &CODECAPI_AVEncCommonMeanBitRate, Bitrate));
+		}
+		HR(IMFAttributes_SetUINT32(Params, &CODECAPI_AVEncMPVGOPSize, GopSize));
+		HR(IMFAttributes_SetUINT32(Params, &CODECAPI_AVLowLatencyMode, FALSE));
+		HR(IMFAttributes_SetUINT32(Params, &CODECAPI_AVEncMPVDefaultBPictureCount, Bframes));
+
+		hr = IMFSinkWriter_SetInputMediaType(Writer, Encoder->VideoStreamIndex, Type, Params);
+		if (FAILED(hr))
+		{
+			// in case encoder rejects some of parameters, they will be set with ICodecAPI below
+			hr = IMFSinkWriter_SetInputMediaType(Writer, Encoder->VideoStreamIndex, Type, NULL);
+		}
+		IMFAttributes_Release(Params);
 		IMFMediaType_Release(Type);
 
 		if (FAILED(hr))
@@ -518,30 +549,35 @@ BOOL Encoder_Start(Encoder* Encoder, ID3D11Device* Device, LPWSTR FileName, cons
 		}
 	}
 
-	// video encoder parameters
+	// set same video encoder parameters again, for MFT encoders that support them only through ICodecAPI
 	{
 		ICodecAPI* Codec;
 		HR(IMFSinkWriter_GetServiceForStream(Writer, 0, &GUID_NULL, &IID_ICodecAPI, (LPVOID*)&Codec));
 
-		// VBR rate control
-		VARIANT RateControl = { .vt = VT_UI4, .ulVal = eAVEncCommonRateControlMode_UnconstrainedVBR };
-		ICodecAPI_SetValue(Codec, &CODECAPI_AVEncCommonRateControlMode, &RateControl);
+		VARIANT RateControlValue = { .vt = VT_UI4, .ulVal = RateControl };
+		ICodecAPI_SetValue(Codec, &CODECAPI_AVEncCommonRateControlMode, &RateControlValue);
 
-		// VBR bitrate to use, some MFT encoders override MF_MT_AVG_BITRATE setting with this one
-		VARIANT Bitrate = { .vt = VT_UI4, .ulVal = Config->Config->VideoBitrate * 1000 };
-		ICodecAPI_SetValue(Codec, &CODECAPI_AVEncCommonMeanBitRate, &Bitrate);
+		if (UseQuality)
+		{
+			VARIANT QualityValue = { .vt = VT_UI4, .ulVal = Quality };
+			ICodecAPI_SetValue(Codec, &CODECAPI_AVEncCommonQuality, &QualityValue);
+		}
+		else
+		{
+			// VBR bitrate to use, some MFT encoders override MF_MT_AVG_BITRATE setting with this one
+			VARIANT BitrateValue = { .vt = VT_UI4, .ulVal = Bitrate };
+			ICodecAPI_SetValue(Codec, &CODECAPI_AVEncCommonMeanBitRate, &BitrateValue);
+		}
 
-		// set GOP size to 4 seconds
-		VARIANT GopSize = { .vt = VT_UI4, .ulVal = MUL_DIV_ROUND_UP(4, Config->FramerateNum, Config->FramerateDen) };
-		ICodecAPI_SetValue(Codec, &CODECAPI_AVEncMPVGOPSize, &GopSize);
+		VARIANT GopSizeValue = { .vt = VT_UI4, .ulVal = GopSize };
+		ICodecAPI_SetValue(Codec, &CODECAPI_AVEncMPVGOPSize, &GopSizeValue);
 
 		// disable low latency, for higher quality & better performance
 		VARIANT LowLatency = { .vt = VT_BOOL, .boolVal = VARIANT_FALSE };
 		ICodecAPI_SetValue(Codec, &CODECAPI_AVLowLatencyMode, &LowLatency);
 
-		// enable 2 B-frames, for better compression
-		VARIANT Bframes = { .vt = VT_UI4, .ulVal = 2 };
-		ICodecAPI_SetValue(Codec, &CODECAPI_AVEncMPVDefaultBPictureCount, &Bframes);
+		VARIANT BframesValue = { .vt = VT_UI4, .ulVal = Bframes };
+		ICodecAPI_SetValue(Codec, &CODECAPI_AVEncMPVDefaultBPictureCount, &BframesValue);
 
 		ICodecAPI_Release(Codec);
 	}
