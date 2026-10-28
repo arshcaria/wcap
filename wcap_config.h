@@ -38,6 +38,7 @@ typedef struct
 	// video
 	BOOL GammaCorrectResize;
 	BOOL ImprovedColorConversion;
+	BOOL UseOriginalSize;
 	DWORD VideoCodec;
 	DWORD VideoProfile;
 	DWORD VideoMaxWidth;
@@ -100,6 +101,7 @@ static BOOL Config_ShowDialog(Config* C);
 
 #define ID_VIDEO_GAMMA_RESIZE      200
 #define ID_VIDEO_IMPROVED_CONVERT  210
+#define ID_VIDEO_ORIGINAL_SIZE     215
 #define ID_VIDEO_CODEC             220
 #define ID_VIDEO_PROFILE           230
 #define ID_VIDEO_MAX_WIDTH         240
@@ -140,7 +142,7 @@ static BOOL Config_ShowDialog(Config* C);
 #define COL10W 144
 #define COL11W 130
 #define ROW0H 84
-#define ROW1H 124
+#define ROW1H 138
 #define ROW2H 56
 
 #define PADDING 4             // padding for dialog and group boxes
@@ -340,6 +342,7 @@ static void Config__SetDialogValues(HWND Window, Config* C)
 	// video
 	CheckDlgButton(Window, ID_VIDEO_GAMMA_RESIZE,     C->GammaCorrectResize);
 	CheckDlgButton(Window, ID_VIDEO_IMPROVED_CONVERT, C->ImprovedColorConversion);
+	CheckDlgButton(Window, ID_VIDEO_ORIGINAL_SIZE,    C->UseOriginalSize);
 	SendDlgItemMessageW(Window, ID_VIDEO_CODEC, CB_SETCURSEL, C->VideoCodec, 0);
 	Config__SelectVideoProfile(Window, C->VideoCodec, C->VideoProfile);
 	SetDlgItemInt(Window, ID_VIDEO_MAX_WIDTH,     C->VideoMaxWidth,     FALSE);
@@ -380,6 +383,8 @@ static void Config__SetDialogValues(HWND Window, Config* C)
 	EnableWindow(GetDlgItem(Window, ID_GPU_ENCODER + 1),  C->HardwareEncoder);
 	EnableWindow(GetDlgItem(Window, ID_LIMIT_LENGTH + 1), C->EnableLimitLength);
 	EnableWindow(GetDlgItem(Window, ID_LIMIT_SIZE + 1),   C->EnableLimitSize);
+	EnableWindow(GetDlgItem(Window, ID_VIDEO_MAX_WIDTH),  !C->UseOriginalSize);
+	EnableWindow(GetDlgItem(Window, ID_VIDEO_MAX_HEIGHT), !C->UseOriginalSize);
 
 	EnableWindow(GetDlgItem(Window, ID_MOUSE_CURSOR),            ScreenCapture_CanHideMouseCursor());
 	EnableWindow(GetDlgItem(Window, ID_SHOW_RECORDING_BORDER),   ScreenCapture_CanHideRecordingBorder());
@@ -505,6 +510,7 @@ static LRESULT CALLBACK Config__DialogProc(HWND Window, UINT Message, WPARAM WPa
 			// video
 			C->GammaCorrectResize      = IsDlgButtonChecked(Window, ID_VIDEO_GAMMA_RESIZE);
 			C->ImprovedColorConversion = IsDlgButtonChecked(Window, ID_VIDEO_IMPROVED_CONVERT);
+			C->UseOriginalSize         = IsDlgButtonChecked(Window, ID_VIDEO_ORIGINAL_SIZE);
 			C->VideoCodec              = (DWORD)SendDlgItemMessageW(Window, ID_VIDEO_CODEC,   CB_GETCURSEL, 0, 0);
 			C->VideoProfile            = Config__GetSelectedVideoProfile(Window);
 			C->VideoMaxWidth           = GetDlgItemInt(Window, ID_VIDEO_MAX_WIDTH,     NULL, FALSE);
@@ -572,6 +578,13 @@ static LRESULT CALLBACK Config__DialogProc(HWND Window, UINT Message, WPARAM WPa
 		else if (Control == ID_LIMIT_SIZE && HIWORD(WParam) == BN_CLICKED)
 		{
 			EnableWindow(GetDlgItem(Window, ID_LIMIT_SIZE + 1), (BOOL)SendDlgItemMessageW(Window, ID_LIMIT_SIZE, BM_GETCHECK, 0, 0));
+			return TRUE;
+		}
+		else if (Control == ID_VIDEO_ORIGINAL_SIZE && HIWORD(WParam) == BN_CLICKED)
+		{
+			BOOL UseOriginalSize = (BOOL)SendDlgItemMessageW(Window, ID_VIDEO_ORIGINAL_SIZE, BM_GETCHECK, 0, 0);
+			EnableWindow(GetDlgItem(Window, ID_VIDEO_MAX_WIDTH),  !UseOriginalSize);
+			EnableWindow(GetDlgItem(Window, ID_VIDEO_MAX_HEIGHT), !UseOriginalSize);
 			return TRUE;
 		}
 		else if (Control == ID_OUTPUT_FOLDER + 1)
@@ -860,6 +873,7 @@ void Config_Defaults(Config* C)
 		// video
 		.GammaCorrectResize = FALSE,
 		.ImprovedColorConversion = FALSE,
+		.UseOriginalSize = FALSE,
 		.VideoCodec = CONFIG_VIDEO_H264,
 		.VideoProfile = CONFIG_VIDEO_HIGH,
 		.VideoMaxWidth = 1920,
@@ -970,6 +984,7 @@ void Config_Load(Config* C, LPCWSTR FileName)
 	// video
 	Config__GetBool(FileName, L"GammaCorrectResize",      &C->GammaCorrectResize);
 	Config__GetBool(FileName, L"ImprovedColorConversion", &C->ImprovedColorConversion);
+	Config__GetBool(FileName, L"UseOriginalSize",         &C->UseOriginalSize);
 	Config__GetStr(FileName, L"VideoCodec",               &C->VideoCodec,        gVideoCodecs);
 	Config__GetStr(FileName, L"VideoProfile",             &C->VideoProfile,      gVideoProfiles);
 	Config__GetInt(FileName, L"VideoMaxWidth",            &C->VideoMaxWidth,     NULL);
@@ -1018,6 +1033,7 @@ void Config_Save(Config* C, LPCWSTR FileName)
 	// video
 	WritePrivateProfileStringW(INI_SECTION, L"GammaCorrectResize",      C->GammaCorrectResize      ? L"1" : L"0", FileName);
 	WritePrivateProfileStringW(INI_SECTION, L"ImprovedColorConversion", C->ImprovedColorConversion ? L"1" : L"0", FileName);
+	WritePrivateProfileStringW(INI_SECTION, L"UseOriginalSize",         C->UseOriginalSize         ? L"1" : L"0", FileName);
 	WritePrivateProfileStringW(INI_SECTION, L"VideoCodec",   gVideoCodecs[C->VideoCodec],     FileName);
 	WritePrivateProfileStringW(INI_SECTION, L"VideoProfile", gVideoProfiles[C->VideoProfile], FileName);
 	Config__WriteInt(FileName, L"VideoMaxWidth",     C->VideoMaxWidth);
@@ -1085,6 +1101,7 @@ BOOL Config_ShowDialog(Config* C)
 				{
 					{ "&Gamma Correct Resize",      ID_VIDEO_GAMMA_RESIZE ,    ITEM_CHECKBOX     },
 					{ "&Improved Color Conversion", ID_VIDEO_IMPROVED_CONVERT, ITEM_CHECKBOX     },
+					{ "&Original Size",             ID_VIDEO_ORIGINAL_SIZE,    ITEM_CHECKBOX     },
 					{ "Codec",                      ID_VIDEO_CODEC,            ITEM_COMBOBOX, 64 },
 					{ "Profile",                    ID_VIDEO_PROFILE,          ITEM_COMBOBOX, 64 },
 					{ "Max &Width",                 ID_VIDEO_MAX_WIDTH,        ITEM_NUMBER,   64 },

@@ -253,7 +253,13 @@ BOOL Encoder_Start(Encoder* Encoder, ID3D11Device* Device, LPWSTR FileName, cons
 	DWORD OutputWidth = Config->Config->VideoMaxWidth;
 	DWORD OutputHeight = Config->Config->VideoMaxHeight;
 
-	if (OutputWidth != 0 && OutputHeight == 0)
+	if (Config->Config->UseOriginalSize)
+	{
+		// ignore max width/height
+		OutputWidth = InputWidth;
+		OutputHeight = InputHeight;
+	}
+	else if (OutputWidth != 0 && OutputHeight == 0)
 	{
 		// limit max width
 		if (OutputWidth < InputWidth)
