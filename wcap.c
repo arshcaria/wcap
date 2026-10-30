@@ -217,7 +217,8 @@ static RECT CropRect(RECT Rect)
 	return Rect;
 }
 
-// crop profile with process name matching window's executable (".exe" optional), NULL if none
+// crop profile with process name matching window's executable (".exe" optional),
+// or with process containing '\' that is part of executable path, NULL if none
 static const ConfigCrop* FindCropProfile(HWND Window)
 {
 	DWORD ProcessId;
@@ -249,7 +250,14 @@ static const ConfigCrop* FindCropProfile(HWND Window)
 	for (int i = 0; i < CONFIG_CROP_COUNT; i++)
 	{
 		LPCWSTR CropProcess = gConfig.Crop[i].Process;
-		if (CropProcess[0] && (StrCmpIW(CropProcess, Name) == 0 || StrCmpIW(CropProcess, BaseName) == 0))
+		if (CropProcess[0] == 0)
+		{
+			continue;
+		}
+		BOOL Match = StrChrW(CropProcess, L'\\')
+			? StrStrIW(Path, CropProcess) != NULL
+			: StrCmpIW(CropProcess, Name) == 0 || StrCmpIW(CropProcess, BaseName) == 0;
+		if (Match)
 		{
 			return &gConfig.Crop[i];
 		}

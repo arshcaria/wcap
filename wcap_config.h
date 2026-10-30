@@ -25,7 +25,7 @@
 
 typedef struct
 {
-	WCHAR Process[64]; // executable name of captured window, empty = unused
+	WCHAR Process[MAX_PATH]; // executable name of captured window, or part of its path if contains '\', empty = unused
 	DWORD X;
 	DWORD Y;
 	DWORD Width;
@@ -222,7 +222,7 @@ static void Config__UpdateCropProfiles(HWND Window)
 
 	for (int i = 0; i < CONFIG_CROP_COUNT; i++)
 	{
-		WCHAR Text[128];
+		WCHAR Text[MAX_PATH + 16];
 		StrFormat(Text, L"%d: %ls", i + 1, gConfigCrop[i].Process[0] ? gConfigCrop[i].Process : L"(unused)");
 		ComboBox_AddString(Control, Text);
 	}
@@ -1023,8 +1023,8 @@ void Config_Defaults(Config* C)
 		.EnableCrop = FALSE,
 		.Crop =
 		{
-			{ L"xvast.exe",       2, 120, 1920, 1080 },
-			{ L"WeChatAppEx.exe", 2,  96, 1920, 1080 },
+			{ L"Xvast\\chrome.exe", 2, 120, 1920, 1080 },
+			{ L"WeChatAppEx.exe",   2,  96, 1920, 1080 },
 		},
 		// audio
 		.CaptureAudio = TRUE,
