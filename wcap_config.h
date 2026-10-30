@@ -21,6 +21,18 @@
 #define CONFIG_AUDIO_AAC  0
 #define CONFIG_AUDIO_FLAC 1
 
+#define CONFIG_CROP_COUNT 4
+
+typedef struct
+{
+	WCHAR Process[64]; // executable name of captured window, empty = unused
+	DWORD X;
+	DWORD Y;
+	DWORD Width;
+	DWORD Height;
+}
+ConfigCrop;
+
 typedef struct
 {
 	// capture
@@ -53,10 +65,7 @@ typedef struct
 	DWORD VideoQuality;
 	// crop
 	BOOL EnableCrop;
-	DWORD CropX;
-	DWORD CropY;
-	DWORD CropWidth;
-	DWORD CropHeight;
+	ConfigCrop Crop[CONFIG_CROP_COUNT];
 	// audio
 	BOOL CaptureAudio;
 	BOOL ApplicationLocalAudio;
@@ -131,8 +140,9 @@ static BOOL Config_ShowDialog(Config* C);
 #define ID_AUDIO_SAMPLERATE        340
 #define ID_AUDIO_BITRATE           350
 
-#define ID_CROP                    500
-#define ID_CROP_X                  510
+#define ID_CROP                    500 // +1 is profile combobox
+#define ID_CROP_PROCESS            505
+#define ID_CROP_X                 510
 #define ID_CROP_Y                  520
 #define ID_CROP_WIDTH              530
 #define ID_CROP_HEIGHT             540
@@ -148,6 +158,7 @@ static BOOL Config_ShowDialog(Config* C);
 #define ITEM_FOLDER   (1<<3)
 #define ITEM_BUTTON   (1<<4)
 #define ITEM_HOTKEY   (1<<5)
+#define ITEM_TEXT     (1<<6)
 
 // win32 control styles
 #define CONTROL_BUTTON    0x0080
@@ -163,7 +174,7 @@ static BOOL Config_ShowDialog(Config* C);
 #define COL10W 144
 #define COL11W 130
 #define ROW0H 98
-#define ROW1H 182
+#define ROW1H 196
 #define ROW1AH 96 // audio group height, crop group gets the rest of ROW1H
 #define ROW2H 56
 
@@ -199,6 +210,55 @@ struct
 	int Control;
 }
 static gConfigShortcut;
+
+// crop profiles being edited in dialog, copied to config only on OK
+static ConfigCrop gConfigCrop[CONFIG_CROP_COUNT];
+static int gConfigCropIndex;
+
+static void Config__UpdateCropProfiles(HWND Window)
+{
+	HWND Control = GetDlgItem(Window, ID_CROP + 1);
+	ComboBox_ResetContent(Control);
+
+	for (int i = 0; i < CONFIG_CROP_COUNT; i++)
+	{
+		WCHAR Text[128];
+		StrFormat(Text, L"%d: %ls", i + 1, gConfigCrop[i].Process[0] ? gConfigCrop[i].Process : L"(unused)");
+		ComboBox_AddString(Control, Text);
+	}
+	ComboBox_SetCurSel(Control, gConfigCropIndex);
+}
+
+static void Config__ShowCropProfile(HWND Window)
+{
+	const ConfigCrop* Crop = &gConfigCrop[gConfigCropIndex];
+	SetDlgItemTextW(Window, ID_CROP_PROCESS, Crop->Process);
+	SetDlgItemInt(Window, ID_CROP_X,      Crop->X,      FALSE);
+	SetDlgItemInt(Window, ID_CROP_Y,      Crop->Y,      FALSE);
+	SetDlgItemInt(Window, ID_CROP_WIDTH,  Crop->Width,  FALSE);
+	SetDlgItemInt(Window, ID_CROP_HEIGHT, Crop->Height, FALSE);
+}
+
+static void Config__ReadCropProfile(HWND Window)
+{
+	ConfigCrop* Crop = &gConfigCrop[gConfigCropIndex];
+	GetDlgItemTextW(Window, ID_CROP_PROCESS, Crop->Process, _countof(Crop->Process));
+	StrTrimW(Crop->Process, L" \t");
+	Crop->X      = GetDlgItemInt(Window, ID_CROP_X,      NULL, FALSE);
+	Crop->Y      = GetDlgItemInt(Window, ID_CROP_Y,      NULL, FALSE);
+	Crop->Width  = GetDlgItemInt(Window, ID_CROP_WIDTH,  NULL, FALSE);
+	Crop->Height = GetDlgItemInt(Window, ID_CROP_HEIGHT, NULL, FALSE);
+}
+
+static void Config__EnableCrop(HWND Window, BOOL EnableCrop)
+{
+	EnableWindow(GetDlgItem(Window, ID_CROP + 1),     EnableCrop);
+	EnableWindow(GetDlgItem(Window, ID_CROP_PROCESS), EnableCrop);
+	EnableWindow(GetDlgItem(Window, ID_CROP_X),       EnableCrop);
+	EnableWindow(GetDlgItem(Window, ID_CROP_Y),       EnableCrop);
+	EnableWindow(GetDlgItem(Window, ID_CROP_WIDTH),   EnableCrop);
+	EnableWindow(GetDlgItem(Window, ID_CROP_HEIGHT),  EnableCrop);
+}
 
 static void Config__UpdateVideoProfiles(HWND Window, DWORD Codec)
 {
@@ -377,11 +437,11 @@ static void Config__SetDialogValues(HWND Window, Config* C)
 	SetDlgItemInt(Window, ID_VIDEO_QUALITY,       C->VideoQuality,      FALSE);
 
 	// crop
-	CheckDlgButton(Window, ID_CROP,       C->EnableCrop);
-	SetDlgItemInt(Window, ID_CROP_X,      C->CropX,      FALSE);
-	SetDlgItemInt(Window, ID_CROP_Y,      C->CropY,      FALSE);
-	SetDlgItemInt(Window, ID_CROP_WIDTH,  C->CropWidth,  FALSE);
-	SetDlgItemInt(Window, ID_CROP_HEIGHT, C->CropHeight, FALSE);
+	CheckDlgButton(Window, ID_CROP, C->EnableCrop);
+	CopyMemory(gConfigCrop, C->Crop, sizeof(gConfigCrop));
+	gConfigCropIndex = 0;
+	Config__UpdateCropProfiles(Window);
+	Config__ShowCropProfile(Window);
 
 	// audio
 	CheckDlgButton(Window, ID_AUDIO_CAPTURE, C->CaptureAudio);
@@ -420,10 +480,7 @@ static void Config__SetDialogValues(HWND Window, Config* C)
 	EnableWindow(GetDlgItem(Window, ID_VIDEO_MAX_HEIGHT), !C->UseOriginalSize);
 	EnableWindow(GetDlgItem(Window, ID_VIDEO_QUALITY),    C->VideoRateControl == CONFIG_VIDEO_RC_QUALITY);
 	EnableWindow(GetDlgItem(Window, ID_VIDEO_BITRATE),    C->VideoRateControl == CONFIG_VIDEO_RC_VBR);
-	EnableWindow(GetDlgItem(Window, ID_CROP_X),           C->EnableCrop);
-	EnableWindow(GetDlgItem(Window, ID_CROP_Y),           C->EnableCrop);
-	EnableWindow(GetDlgItem(Window, ID_CROP_WIDTH),       C->EnableCrop);
-	EnableWindow(GetDlgItem(Window, ID_CROP_HEIGHT),      C->EnableCrop);
+	Config__EnableCrop(Window, C->EnableCrop);
 
 	EnableWindow(GetDlgItem(Window, ID_MOUSE_CURSOR),              ScreenCapture_CanHideMouseCursor());
 	EnableWindow(GetDlgItem(Window, ID_SHOW_RECORDING_BORDER),     ScreenCapture_CanHideRecordingBorder());
@@ -565,10 +622,8 @@ static LRESULT CALLBACK Config__DialogProc(HWND Window, UINT Message, WPARAM WPa
 			C->VideoQuality            = min(GetDlgItemInt(Window, ID_VIDEO_QUALITY, NULL, FALSE), 100);
 			// crop
 			C->EnableCrop = IsDlgButtonChecked(Window, ID_CROP);
-			C->CropX      = GetDlgItemInt(Window, ID_CROP_X,      NULL, FALSE);
-			C->CropY      = GetDlgItemInt(Window, ID_CROP_Y,      NULL, FALSE);
-			C->CropWidth  = GetDlgItemInt(Window, ID_CROP_WIDTH,  NULL, FALSE);
-			C->CropHeight = GetDlgItemInt(Window, ID_CROP_HEIGHT, NULL, FALSE);
+			Config__ReadCropProfile(Window);
+			CopyMemory(C->Crop, gConfigCrop, sizeof(C->Crop));
 			// audio
 			C->CaptureAudio          = IsDlgButtonChecked(Window, ID_AUDIO_CAPTURE);
 			C->ApplicationLocalAudio = IsDlgButtonChecked(Window, ID_AUDIO_APPLICATION_LOCAL);
@@ -648,11 +703,17 @@ static LRESULT CALLBACK Config__DialogProc(HWND Window, UINT Message, WPARAM WPa
 		}
 		else if (Control == ID_CROP && HIWORD(WParam) == BN_CLICKED)
 		{
-			BOOL EnableCrop = (BOOL)SendDlgItemMessageW(Window, ID_CROP, BM_GETCHECK, 0, 0);
-			EnableWindow(GetDlgItem(Window, ID_CROP_X),      EnableCrop);
-			EnableWindow(GetDlgItem(Window, ID_CROP_Y),      EnableCrop);
-			EnableWindow(GetDlgItem(Window, ID_CROP_WIDTH),  EnableCrop);
-			EnableWindow(GetDlgItem(Window, ID_CROP_HEIGHT), EnableCrop);
+			Config__EnableCrop(Window, (BOOL)SendDlgItemMessageW(Window, ID_CROP, BM_GETCHECK, 0, 0));
+			return TRUE;
+		}
+		else if (Control == ID_CROP + 1 && HIWORD(WParam) == CBN_SELCHANGE)
+		{
+			// store edited profile, then show newly selected one
+			int Index = (int)SendDlgItemMessageW(Window, ID_CROP + 1, CB_GETCURSEL, 0, 0);
+			Config__ReadCropProfile(Window);
+			gConfigCropIndex = Index;
+			Config__UpdateCropProfiles(Window);
+			Config__ShowCropProfile(Window);
 			return TRUE;
 		}
 		else if (Control == ID_OUTPUT_FOLDER + 1)
@@ -846,6 +907,7 @@ static void Config__DoDialogLayout(const Config__DialogLayout* Layout, BYTE* Dat
 			int HasCombobox  = !!(Item->Item & ITEM_COMBOBOX);
 			int OnlyCheckbox = !(Item->Item & ~ITEM_CHECKBOX);
 			int HasHotKey    = !!(Item->Item & ITEM_HOTKEY);
+			int HasText      = !!(Item->Item & ITEM_TEXT);
 
 			int ItemX = X;
 			int ItemW = W;
@@ -868,7 +930,7 @@ static void Config__DoDialogLayout(const Config__DialogLayout* Layout, BYTE* Dat
 				}
 			}
 
-			if ((HasCombobox && !HasCheckbox) || (HasNumber || HasHotKey) && !HasCheckbox)
+			if ((HasCombobox && !HasCheckbox) || (HasNumber || HasHotKey || HasText) && !HasCheckbox)
 			{
 				// label, only for controls without checkbox, or combobox
 				Data = Config__DoDialogItem(Data, Item->Text, -1, CONTROL_STATIC, 0, ItemX, Y, Item->Width, ITEM_HEIGHT);
@@ -880,6 +942,12 @@ static void Config__DoDialogLayout(const Config__DialogLayout* Layout, BYTE* Dat
 			if (HasNumber)
 			{
 				Data = Config__DoDialogItem(Data, "", ItemId, CONTROL_EDIT, WS_TABSTOP | WS_BORDER | ES_RIGHT | ES_NUMBER, ItemX, Y, ItemW, ITEM_HEIGHT);
+				ItemCount++;
+			}
+
+			if (HasText)
+			{
+				Data = Config__DoDialogItem(Data, "", ItemId, CONTROL_EDIT, WS_TABSTOP | WS_BORDER | ES_AUTOHSCROLL, ItemX, Y, ItemW, ITEM_HEIGHT);
 				ItemCount++;
 			}
 
@@ -953,10 +1021,11 @@ void Config_Defaults(Config* C)
 		.VideoQuality = 60,
 		// crop
 		.EnableCrop = FALSE,
-		.CropX = 2,
-		.CropY = 120,
-		.CropWidth = 1920,
-		.CropHeight = 1080,
+		.Crop =
+		{
+			{ L"xvast.exe",       2, 120, 1920, 1080 },
+			{ L"WeChatAppEx.exe", 2,  96, 1920, 1080 },
+		},
 		// audio
 		.CaptureAudio = TRUE,
 		.ApplicationLocalAudio = TRUE,
@@ -1074,10 +1143,24 @@ void Config_Load(Config* C, LPCWSTR FileName)
 	C->VideoQuality = min(C->VideoQuality, 100);
 	// crop
 	Config__GetBool(FileName, L"EnableCrop", &C->EnableCrop);
-	Config__GetInt(FileName,  L"CropX",      &C->CropX,      NULL);
-	Config__GetInt(FileName,  L"CropY",      &C->CropY,      NULL);
-	Config__GetInt(FileName,  L"CropWidth",  &C->CropWidth,  NULL);
-	Config__GetInt(FileName,  L"CropHeight", &C->CropHeight, NULL);
+	// old single crop setting goes to first profile
+	Config__GetInt(FileName,  L"CropX",      &C->Crop[0].X,      NULL);
+	Config__GetInt(FileName,  L"CropY",      &C->Crop[0].Y,      NULL);
+	Config__GetInt(FileName,  L"CropWidth",  &C->Crop[0].Width,  NULL);
+	Config__GetInt(FileName,  L"CropHeight", &C->Crop[0].Height, NULL);
+	for (int i = 0; i < CONFIG_CROP_COUNT; i++)
+	{
+		ConfigCrop* Crop = &C->Crop[i];
+		WCHAR Key[64];
+		WCHAR Process[_countof(Crop->Process)];
+		StrFormat(Key, L"Crop%dProcess", i + 1);
+		GetPrivateProfileStringW(INI_SECTION, Key, Crop->Process, Process, _countof(Process), FileName);
+		StrCpyW(Crop->Process, Process);
+		StrFormat(Key, L"Crop%dX", i + 1);      Config__GetInt(FileName, Key, &Crop->X,      NULL);
+		StrFormat(Key, L"Crop%dY", i + 1);      Config__GetInt(FileName, Key, &Crop->Y,      NULL);
+		StrFormat(Key, L"Crop%dWidth", i + 1);  Config__GetInt(FileName, Key, &Crop->Width,  NULL);
+		StrFormat(Key, L"Crop%dHeight", i + 1); Config__GetInt(FileName, Key, &Crop->Height, NULL);
+	}
 	// audio
 	Config__GetBool(FileName, L"CaptureAudio",          &C->CaptureAudio);
 	Config__GetBool(FileName, L"ApplicationLocalAudio", &C->ApplicationLocalAudio);
@@ -1132,10 +1215,20 @@ void Config_Save(Config* C, LPCWSTR FileName)
 	Config__WriteInt(FileName, L"VideoQuality",      C->VideoQuality);
 	// crop
 	WritePrivateProfileStringW(INI_SECTION, L"EnableCrop", C->EnableCrop ? L"1" : L"0", FileName);
-	Config__WriteInt(FileName, L"CropX",      C->CropX);
-	Config__WriteInt(FileName, L"CropY",      C->CropY);
-	Config__WriteInt(FileName, L"CropWidth",  C->CropWidth);
-	Config__WriteInt(FileName, L"CropHeight", C->CropHeight);
+	WritePrivateProfileStringW(INI_SECTION, L"CropX",      NULL, FileName);
+	WritePrivateProfileStringW(INI_SECTION, L"CropY",      NULL, FileName);
+	WritePrivateProfileStringW(INI_SECTION, L"CropWidth",  NULL, FileName);
+	WritePrivateProfileStringW(INI_SECTION, L"CropHeight", NULL, FileName);
+	for (int i = 0; i < CONFIG_CROP_COUNT; i++)
+	{
+		const ConfigCrop* Crop = &C->Crop[i];
+		WCHAR Key[64];
+		StrFormat(Key, L"Crop%dProcess", i + 1); WritePrivateProfileStringW(INI_SECTION, Key, Crop->Process, FileName);
+		StrFormat(Key, L"Crop%dX", i + 1);       Config__WriteInt(FileName, Key, Crop->X);
+		StrFormat(Key, L"Crop%dY", i + 1);       Config__WriteInt(FileName, Key, Crop->Y);
+		StrFormat(Key, L"Crop%dWidth", i + 1);   Config__WriteInt(FileName, Key, Crop->Width);
+		StrFormat(Key, L"Crop%dHeight", i + 1);  Config__WriteInt(FileName, Key, Crop->Height);
+	}
 	// audio
 	WritePrivateProfileStringW(INI_SECTION, L"CaptureAudio",          C->CaptureAudio          ? L"1" : L"0", FileName);
 	WritePrivateProfileStringW(INI_SECTION, L"ApplicationLocalAudio", C->ApplicationLocalAudio ? L"1" : L"0", FileName);
@@ -1229,11 +1322,12 @@ BOOL Config_ShowDialog(Config* C)
 				.Rect = { COL10W + PADDING, ROW0H + ROW1AH + PADDING, COL11W, ROW1H - ROW1AH - PADDING },
 				.Items = (Config__DialogItem[])
 				{
-					{ "Crop Window Capt&ure", ID_CROP,        ITEM_CHECKBOX   },
-					{ "Left (X)",             ID_CROP_X,      ITEM_NUMBER, 60 },
-					{ "Top (Y)",              ID_CROP_Y,      ITEM_NUMBER, 60 },
-					{ "Width (0 = all)",      ID_CROP_WIDTH,  ITEM_NUMBER, 60 },
-					{ "Height (0 = all)",     ID_CROP_HEIGHT, ITEM_NUMBER, 60 },
+					{ "Capt&ure Crop",    ID_CROP,         ITEM_CHECKBOX | ITEM_COMBOBOX, 52 },
+					{ "Process",          ID_CROP_PROCESS, ITEM_TEXT,                     36 },
+					{ "Left (X)",         ID_CROP_X,       ITEM_NUMBER,                   60 },
+					{ "Top (Y)",          ID_CROP_Y,       ITEM_NUMBER,                   60 },
+					{ "Width (0 = all)",  ID_CROP_WIDTH,   ITEM_NUMBER,                   60 },
+					{ "Height (0 = all)", ID_CROP_HEIGHT,  ITEM_NUMBER,                   60 },
 					{ NULL },
 				},
 			},
@@ -1252,7 +1346,7 @@ BOOL Config_ShowDialog(Config* C)
 		},
 	};
 
-	BYTE __declspec(align(4)) Data[8192];
+	BYTE __declspec(align(4)) Data[16384];
 	Config__DoDialogLayout(&Dialog, Data, sizeof(Data));
 
 	return (BOOL)DialogBoxIndirectParamW(GetModuleHandleW(NULL), (LPCDLGTEMPLATEW)Data, NULL, Config__DialogProc, (LPARAM)C);

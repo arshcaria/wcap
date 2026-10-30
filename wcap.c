@@ -100,6 +100,7 @@ static UINT64 gRecordingNextTooltip;
 static EXECUTION_STATE gRecordingState;
 static WCHAR gRecordingPath[MAX_PATH];
 static BOOL gRecordingCrop;
+static ConfigCrop gRecordingCropRect;
 
 // when selecting rectangle to record
 static HMONITOR gRectMonitor;
@@ -202,18 +203,58 @@ static RECT CropRect(RECT Rect)
 {
 	if (gRecordingCrop)
 	{
-		Rect.left = min(Rect.left + (LONG)gConfig.CropX, Rect.right);
-		Rect.top = min(Rect.top + (LONG)gConfig.CropY, Rect.bottom);
-		if (gConfig.CropWidth != 0)
+		Rect.left = min(Rect.left + (LONG)gRecordingCropRect.X, Rect.right);
+		Rect.top = min(Rect.top + (LONG)gRecordingCropRect.Y, Rect.bottom);
+		if (gRecordingCropRect.Width != 0)
 		{
-			Rect.right = min(Rect.right, Rect.left + (LONG)gConfig.CropWidth);
+			Rect.right = min(Rect.right, Rect.left + (LONG)gRecordingCropRect.Width);
 		}
-		if (gConfig.CropHeight != 0)
+		if (gRecordingCropRect.Height != 0)
 		{
-			Rect.bottom = min(Rect.bottom, Rect.top + (LONG)gConfig.CropHeight);
+			Rect.bottom = min(Rect.bottom, Rect.top + (LONG)gRecordingCropRect.Height);
 		}
 	}
 	return Rect;
+}
+
+// crop profile with process name matching window's executable (".exe" optional), NULL if none
+static const ConfigCrop* FindCropProfile(HWND Window)
+{
+	DWORD ProcessId;
+	if (!GetWindowThreadProcessId(Window, &ProcessId))
+	{
+		return NULL;
+	}
+
+	HANDLE Process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, ProcessId);
+	if (!Process)
+	{
+		return NULL;
+	}
+
+	WCHAR Path[MAX_PATH];
+	DWORD PathSize = _countof(Path);
+	BOOL Ok = QueryFullProcessImageNameW(Process, 0, Path, &PathSize);
+	CloseHandle(Process);
+	if (!Ok)
+	{
+		return NULL;
+	}
+
+	LPCWSTR Name = PathFindFileNameW(Path);
+	WCHAR BaseName[MAX_PATH];
+	StrCpyW(BaseName, Name);
+	PathRemoveExtensionW(BaseName);
+
+	for (int i = 0; i < CONFIG_CROP_COUNT; i++)
+	{
+		LPCWSTR CropProcess = gConfig.Crop[i].Process;
+		if (CropProcess[0] && (StrCmpIW(CropProcess, Name) == 0 || StrCmpIW(CropProcess, BaseName) == 0))
+		{
+			return &gConfig.Crop[i];
+		}
+	}
+	return NULL;
 }
 
 static void StartRecording(ID3D11Device* Device, HWND Window)
@@ -254,7 +295,12 @@ static void StartRecording(ID3D11Device* Device, HWND Window)
 	}
 
 	// crop only window capture, region capture is already cropped
-	gRecordingCrop = Window != NULL && gConfig.EnableCrop;
+	const ConfigCrop* Crop = Window != NULL && gConfig.EnableCrop ? FindCropProfile(Window) : NULL;
+	gRecordingCrop = Crop != NULL;
+	if (Crop)
+	{
+		gRecordingCropRect = *Crop;
+	}
 	RECT Rect = CropRect(gCapture.Rect);
 	if (Rect.right == Rect.left || Rect.bottom == Rect.top)
 	{
