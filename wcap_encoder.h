@@ -72,6 +72,9 @@ static BOOL Encoder_Start(Encoder* Encoder, ID3D11Device* Device, LPWSTR FileNam
 static void Encoder_Stop(Encoder* Encoder);
 
 static BOOL Encoder_NewFrame(Encoder* Encoder, ID3D11Texture2D* Texture, RECT Rect, UINT64 Time, UINT64 TimePeriod);
+// copies frame to input texture without encoding it, it can be encoded later with SubmitHeldFrame
+static void Encoder_HoldFrame(Encoder* Encoder, ID3D11Texture2D* Texture, RECT Rect);
+static BOOL Encoder_SubmitHeldFrame(Encoder* Encoder, UINT64 Time, UINT64 TimePeriod);
 static void Encoder_NewSamples(Encoder* Encoder, LPCVOID Samples, DWORD FrameCount, UINT64 Time, UINT64 TimePeriod);
 static void Encoder_Update(Encoder* Encoder, UINT64 Time, UINT64 TimePeriod);
 static void Encoder_GetStats(Encoder* Encoder, DWORD* Bitrate, DWORD* LengthMsec, UINT64* FileSize);
@@ -818,28 +821,10 @@ void Encoder_Stop(Encoder* Encoder)
 	ID3D11DeviceContext_Release(Encoder->Context);
 }
 
-BOOL Encoder_NewFrame(Encoder* Encoder, ID3D11Texture2D* Texture, RECT Rect, UINT64 Time, UINT64 TimePeriod)
+// copy frame to input texture, must be called inside Multithread Enter/Leave
+static void Encoder__CopyInput(Encoder* Encoder, ID3D11Texture2D* Texture, RECT Rect)
 {
-	Encoder->VideoLastTime = Time;
-
-	uint64_t Available = atomic_load(&Encoder->VideoSampleAvailable);
-	if (Available == 0)
-	{
-		// dropped frame
-		LONGLONG Timestamp = MFllMulDiv(Time - Encoder->StartTime, MF_UNITS_PER_SECOND, TimePeriod, 0);
-		HR(IMFSinkWriter_SendStreamTick(Encoder->Writer, Encoder->VideoStreamIndex, Timestamp));
-		Encoder->VideoDiscontinuity = TRUE;
-		return FALSE;
-	}
-
-	DWORD Index;
-	_BitScanForward64(&Index, Available);
-	atomic_fetch_and(&Encoder->VideoSampleAvailable, ~(1ULL << Index));
-
 	ID3D11DeviceContext* Context = Encoder->Context;
-	ID3D11Multithread_Enter(Encoder->Multithread);
-
-	// copy to input texture
 	{
 		D3D11_BOX Box =
 		{
@@ -864,16 +849,46 @@ BOOL Encoder_NewFrame(Encoder* Encoder, ID3D11Texture2D* Texture, RECT Rect, UIN
 		Box.bottom = Box.top + min(Encoder->InputHeight, Height);
 		ID3D11DeviceContext_CopySubresourceRegion(Context, (ID3D11Resource*)Encoder->Resize.InputTexture, 0, 0, 0, 0, (ID3D11Resource*)Texture, 0, &Box);
 	}
+}
+
+// take free video sample, returns FALSE if there is none (frame needs to be dropped)
+static BOOL Encoder__AcquireVideoSample(Encoder* Encoder, UINT64 Time, UINT64 TimePeriod, DWORD* OutIndex)
+{
+	Encoder->VideoLastTime = Time;
+
+	uint64_t Available = atomic_load(&Encoder->VideoSampleAvailable);
+	if (Available == 0)
+	{
+		// dropped frame
+		LONGLONG Timestamp = MFllMulDiv(Time - Encoder->StartTime, MF_UNITS_PER_SECOND, TimePeriod, 0);
+		HR(IMFSinkWriter_SendStreamTick(Encoder->Writer, Encoder->VideoStreamIndex, Timestamp));
+		Encoder->VideoDiscontinuity = TRUE;
+		return FALSE;
+	}
+
+	DWORD Index;
+	_BitScanForward64(&Index, Available);
+	atomic_fetch_and(&Encoder->VideoSampleAvailable, ~(1ULL << Index));
+
+	*OutIndex = Index;
+	return TRUE;
+}
+
+// resize & convert input texture to video sample buffer, must be called inside Multithread Enter/Leave
+static void Encoder__ConvertInput(Encoder* Encoder, DWORD Index)
+{
+	ID3D11DeviceContext* Context = Encoder->Context;
 
 	// resize if needed
 	TexResize_Dispatch(&Encoder->Resize, Context);
 
 	// convert to YUV
 	YuvConvert_Dispatch(&Encoder->Convert, Context, &Encoder->ConvertOutput[Index]);
+}
 
-	ID3D11DeviceContext_Flush(Context);
-	ID3D11Multithread_Leave(Encoder->Multithread);
-
+// submit converted video sample to encoder
+static void Encoder__WriteVideoSample(Encoder* Encoder, DWORD Index, UINT64 Time, UINT64 TimePeriod)
+{
 	// setup input time & duration
 	if (Encoder->StartTime == 0)
 	{
@@ -904,7 +919,49 @@ BOOL Encoder_NewFrame(Encoder* Encoder, ID3D11Texture2D* Texture, RECT Rect, UIN
 	HR(IMFSinkWriter_WriteSample(Encoder->Writer, Encoder->VideoStreamIndex, Sample));
 
 	IMFSample_Release(Sample);
+}
 
+BOOL Encoder_NewFrame(Encoder* Encoder, ID3D11Texture2D* Texture, RECT Rect, UINT64 Time, UINT64 TimePeriod)
+{
+	DWORD Index;
+	if (!Encoder__AcquireVideoSample(Encoder, Time, TimePeriod, &Index))
+	{
+		return FALSE;
+	}
+
+	ID3D11Multithread_Enter(Encoder->Multithread);
+	Encoder__CopyInput(Encoder, Texture, Rect);
+	Encoder__ConvertInput(Encoder, Index);
+	ID3D11DeviceContext_Flush(Encoder->Context);
+	ID3D11Multithread_Leave(Encoder->Multithread);
+
+	Encoder__WriteVideoSample(Encoder, Index, Time, TimePeriod);
+	return TRUE;
+}
+
+void Encoder_HoldFrame(Encoder* Encoder, ID3D11Texture2D* Texture, RECT Rect)
+{
+	// flush so copy is done before capture frame gets released & reused
+	ID3D11Multithread_Enter(Encoder->Multithread);
+	Encoder__CopyInput(Encoder, Texture, Rect);
+	ID3D11DeviceContext_Flush(Encoder->Context);
+	ID3D11Multithread_Leave(Encoder->Multithread);
+}
+
+BOOL Encoder_SubmitHeldFrame(Encoder* Encoder, UINT64 Time, UINT64 TimePeriod)
+{
+	DWORD Index;
+	if (!Encoder__AcquireVideoSample(Encoder, Time, TimePeriod, &Index))
+	{
+		return FALSE;
+	}
+
+	ID3D11Multithread_Enter(Encoder->Multithread);
+	Encoder__ConvertInput(Encoder, Index);
+	ID3D11DeviceContext_Flush(Encoder->Context);
+	ID3D11Multithread_Leave(Encoder->Multithread);
+
+	Encoder__WriteVideoSample(Encoder, Index, Time, TimePeriod);
 	return TRUE;
 }
 
@@ -1035,14 +1092,15 @@ void Encoder_GetStats(Encoder* Encoder, DWORD* Bitrate, DWORD* LengthMsec, UINT6
 	MF_SINK_WRITER_STATISTICS Stats = { .cb = sizeof(Stats) };
 	HR(IMFSinkWriter_GetStatistics(Encoder->Writer, Encoder->VideoStreamIndex, &Stats));
 
-	*Bitrate = (DWORD)MFllMulDiv(8 * Stats.qwByteCountProcessed, MF_UNITS_PER_SECOND, 1000 * Stats.llLastTimestampProcessed, 0);
+	// stats can be queried before anything is processed, for example when paused right after start
+	*Bitrate = Stats.llLastTimestampProcessed ? (DWORD)MFllMulDiv(8 * Stats.qwByteCountProcessed, MF_UNITS_PER_SECOND, 1000 * Stats.llLastTimestampProcessed, 0) : 0;
 	*LengthMsec = (DWORD)(Stats.llLastTimestampProcessed / 10000);
 	*FileSize = Stats.qwByteCountProcessed;
 
 	if (Encoder->AudioStreamIndex >= 0)
 	{
 		HR(IMFSinkWriter_GetStatistics(Encoder->Writer, Encoder->AudioStreamIndex, &Stats));
-		*Bitrate += (DWORD)MFllMulDiv(8 * Stats.qwByteCountProcessed, MF_UNITS_PER_SECOND, 1000 * Stats.llLastTimestampProcessed, 0);
+		*Bitrate += Stats.llLastTimestampProcessed ? (DWORD)MFllMulDiv(8 * Stats.qwByteCountProcessed, MF_UNITS_PER_SECOND, 1000 * Stats.llLastTimestampProcessed, 0) : 0;
 		*FileSize += Stats.qwByteCountProcessed;
 	}
 }

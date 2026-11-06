@@ -14,6 +14,7 @@ Features
  * press <kbd>Ctrl + Win + PrintScreen</kbd> to start recording currently active window
  * press <kbd>Ctrl + Shift + PrintScreen</kbd> to select & record fixed region on current monitor
  * press any of previous combinations to stop recording
+ * press <kbd>Ctrl + Win + Alt + P</kbd> to pause & resume recording, paused time is cut out of the video and audio stays in sync - red border with "Paused" label is shown while paused, it is not recorded
  * right or double-click on tray icon to change settings
  * video encoded using [H264/AVC][], [H265/HEVC][] or [AV1][], with 10-bit support for HEVC and AV1
  * audio encoded using [AAC][] or [FLAC][]

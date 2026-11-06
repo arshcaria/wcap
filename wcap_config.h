@@ -77,6 +77,7 @@ typedef struct
 	DWORD ShortcutMonitor;
 	DWORD ShortcutWindow;
 	DWORD ShortcutRegion;
+	DWORD ShortcutPause;
 }
 Config;
 
@@ -150,6 +151,7 @@ static BOOL Config_ShowDialog(Config* C);
 #define ID_SHORTCUT_MONITOR        400
 #define ID_SHORTCUT_WINDOW         410
 #define ID_SHORTCUT_REGION         420
+#define ID_SHORTCUT_PAUSE          430
 
 // control types
 #define ITEM_CHECKBOX (1<<0)
@@ -176,7 +178,7 @@ static BOOL Config_ShowDialog(Config* C);
 #define ROW0H 98
 #define ROW1H 196
 #define ROW1AH 96 // audio group height, crop group gets the rest of ROW1H
-#define ROW2H 56
+#define ROW2H 70
 
 #define PADDING 4             // padding for dialog and group boxes
 #define BUTTON_WIDTH 50       // normal button width
@@ -472,6 +474,9 @@ static void Config__SetDialogValues(HWND Window, Config* C)
 	Config__FormatKey(C->ShortcutRegion, Text);
 	SetDlgItemTextW(Window, ID_SHORTCUT_REGION, Text);
 	SetWindowLongW(GetDlgItem(Window, ID_SHORTCUT_REGION), GWLP_USERDATA, C->ShortcutRegion);
+	Config__FormatKey(C->ShortcutPause, Text);
+	SetDlgItemTextW(Window, ID_SHORTCUT_PAUSE, Text);
+	SetWindowLongW(GetDlgItem(Window, ID_SHORTCUT_PAUSE), GWLP_USERDATA, C->ShortcutPause);
 
 	EnableWindow(GetDlgItem(Window, ID_GPU_ENCODER + 1),  C->HardwareEncoder);
 	EnableWindow(GetDlgItem(Window, ID_LIMIT_LENGTH + 1), C->EnableLimitLength);
@@ -638,6 +643,7 @@ static LRESULT CALLBACK Config__DialogProc(HWND Window, UINT Message, WPARAM WPa
 			C->ShortcutMonitor = GetWindowLongW(GetDlgItem(Window, ID_SHORTCUT_MONITOR), GWLP_USERDATA);
 			C->ShortcutWindow  = GetWindowLongW(GetDlgItem(Window, ID_SHORTCUT_WINDOW),  GWLP_USERDATA);
 			C->ShortcutRegion  = GetWindowLongW(GetDlgItem(Window, ID_SHORTCUT_REGION),  GWLP_USERDATA);
+			C->ShortcutPause   = GetWindowLongW(GetDlgItem(Window, ID_SHORTCUT_PAUSE),   GWLP_USERDATA);
 
 			EndDialog(Window, TRUE);
 			return TRUE;
@@ -749,7 +755,8 @@ static LRESULT CALLBACK Config__DialogProc(HWND Window, UINT Message, WPARAM WPa
 		}
 		else if ((Control == ID_SHORTCUT_MONITOR ||
 		          Control == ID_SHORTCUT_WINDOW ||
-		          Control == ID_SHORTCUT_REGION) && HIWORD(WParam) == BN_CLICKED)
+		          Control == ID_SHORTCUT_REGION ||
+		          Control == ID_SHORTCUT_PAUSE) && HIWORD(WParam) == BN_CLICKED)
 		{
 			if (gConfigShortcut.Control == 0)
 			{
@@ -1037,6 +1044,7 @@ void Config_Defaults(Config* C)
 		.ShortcutMonitor = HOT_KEY('U', MOD_CONTROL | MOD_WIN | MOD_ALT),
 		.ShortcutWindow  = HOT_KEY('I', MOD_CONTROL | MOD_WIN | MOD_ALT),
 		.ShortcutRegion  = HOT_KEY('O', MOD_CONTROL | MOD_WIN | MOD_ALT),
+		.ShortcutPause   = HOT_KEY('P', MOD_CONTROL | MOD_WIN | MOD_ALT),
 	};
 
 	LPWSTR VideoFolder;
@@ -1172,6 +1180,7 @@ void Config_Load(Config* C, LPCWSTR FileName)
 	Config__GetInt(FileName, L"ShortcutMonitor", &C->ShortcutMonitor, NULL);
 	Config__GetInt(FileName, L"ShortcutWindow",  &C->ShortcutWindow,  NULL);
 	Config__GetInt(FileName, L"ShortcutRect",    &C->ShortcutRegion,  NULL);
+	Config__GetInt(FileName, L"ShortcutPause",   &C->ShortcutPause,   NULL);
 
 	Config__ValidateVideoProfile(C);
 }
@@ -1240,6 +1249,7 @@ void Config_Save(Config* C, LPCWSTR FileName)
 	Config__WriteInt(FileName, L"ShortcutMonitor", C->ShortcutMonitor);
 	Config__WriteInt(FileName, L"ShortcutWindow",  C->ShortcutWindow);
 	Config__WriteInt(FileName, L"ShortcutRect",    C->ShortcutRegion);
+	Config__WriteInt(FileName, L"ShortcutPause",   C->ShortcutPause);
 }
 
 BOOL Config_ShowDialog(Config* C)
@@ -1339,6 +1349,7 @@ BOOL Config_ShowDialog(Config* C)
 					{ "Capture Monitor", ID_SHORTCUT_MONITOR, ITEM_HOTKEY, 64 },
 					{ "Capture Window",  ID_SHORTCUT_WINDOW,  ITEM_HOTKEY, 64 },
 					{ "Capture Region",  ID_SHORTCUT_REGION,  ITEM_HOTKEY, 64 },
+					{ "Pause / Resume",  ID_SHORTCUT_PAUSE,   ITEM_HOTKEY, 64 },
 					{ NULL },
 				},
 			},

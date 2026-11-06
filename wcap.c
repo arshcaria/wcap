@@ -56,10 +56,16 @@ __declspec(dllexport) DWORD NvOptimusEnablement = 1;
 #define CMD_WCAP     1
 #define CMD_QUIT     2
 #define CMD_SETTINGS 3
+#define CMD_PAUSE    4
+#define CMD_STOP     5
 
 #define HOT_RECORD_WINDOW  1
 #define HOT_RECORD_MONITOR 2
 #define HOT_RECORD_REGION  3
+#define HOT_PAUSE          4
+
+#define WCAP_PAUSE_MAX_RANGES  32
+#define WCAP_PAUSE_KEEP_SEC    5 // how long finished pause ranges are kept for late audio/video data
 
 #define WCAP_RESIZE_NONE 0
 #define WCAP_RESIZE_TL   1
@@ -77,11 +83,16 @@ __declspec(dllexport) DWORD NvOptimusEnablement = 1;
 
 #define WCAP_RECT_BORDER 2
 
+#define WCAP_BORDER_COLOR_RECORDING RGB(255, 255, 0)
+#define WCAP_BORDER_COLOR_PAUSED    RGB(255, 0, 0)
+#define WCAP_COLOR_KEY              RGB(255, 0, 255)
+
 // constants
 static WCHAR gConfigPath[MAX_PATH];
 static LARGE_INTEGER gTickFreq;
 static HICON gIcon1;
 static HICON gIcon2;
+static HICON gIcon3;
 static UINT WM_TASKBARCREATED;
 static HCURSOR gCursorArrow;
 static HCURSOR gCursorClick;
@@ -101,6 +112,29 @@ static EXECUTION_STATE gRecordingState;
 static WCHAR gRecordingPath[MAX_PATH];
 static BOOL gRecordingCrop;
 static ConfigCrop gRecordingCropRect;
+static BOOL gRecordingRegion;
+static HMONITOR gRecordingMonitor;
+
+// pause state, all audio & video data captured inside pause ranges is skipped,
+// and time of data captured after pause range is shifted back by pause duration
+typedef struct
+{
+	UINT64 Begin; // QPC time
+	UINT64 End;   // UINT64_MAX while still paused
+}
+PauseRange;
+
+static BOOL gPaused;
+static PauseRange gPauseRanges[WCAP_PAUSE_MAX_RANGES];
+static int gPauseCount;
+static UINT64 gPausePrunedTotal;  // total duration of old ranges removed from array
+static BOOL gPauseHeldFrame;      // frame captured while paused is copied to encoder input
+static BOOL gPauseHeldPending;    // held frame needs to be encoded after resume, unless newer frame arrives first
+static UINT64 gPauseResumeTime;
+
+// overlay window that shows recording border, it is topmost, transparent for mouse & excluded from screen capture (when supported)
+static HWND gOverlay;
+static BOOL gOverlayExcluded;
 
 // when selecting rectangle to record
 static HMONITOR gRectMonitor;
@@ -265,6 +299,181 @@ static const ConfigCrop* FindCropProfile(HWND Window)
 	return NULL;
 }
 
+// maps capture time to recording time with paused time removed, returns FALSE when time is inside pause
+static BOOL PauseMapTime(UINT64 Time, UINT64* Result)
+{
+	UINT64 Offset = gPausePrunedTotal;
+	for (int i = 0; i < gPauseCount; i++)
+	{
+		const PauseRange* Range = &gPauseRanges[i];
+		if (Time < Range->Begin)
+		{
+			break;
+		}
+		if (Time < Range->End)
+		{
+			return FALSE;
+		}
+		Offset += Range->End - Range->Begin;
+	}
+	*Result = Time - Offset;
+	return TRUE;
+}
+
+// index of first audio frame in buffer (starting at Time, with Count frames) that starts at or after Target time
+static UINT32 AudioFrameIndexAt(UINT64 Time, UINT32 Count, UINT64 Target)
+{
+	const UINT64 SampleRate = gAudio.Format->nSamplesPerSec;
+	const UINT64 Freq = gTickFreq.QuadPart;
+
+	if (Target <= Time)
+	{
+		return 0;
+	}
+	UINT64 Delta = Target - Time;
+	if (Delta > (UINT64)Count * Freq / SampleRate)
+	{
+		return Count;
+	}
+	return (UINT32)((Delta * SampleRate + Freq - 1) / Freq);
+}
+
+// encodes audio frames, skips frames captured while paused
+static void EncodeAudioFrames(BYTE* Samples, UINT32 Count, UINT64 Time)
+{
+	const UINT64 SampleRate = gAudio.Format->nSamplesPerSec;
+	const UINT64 Freq = gTickFreq.QuadPart;
+	const UINT32 BytesPerFrame = gAudio.Format->nBlockAlign;
+
+	UINT32 Index = 0;
+	while (Index < Count)
+	{
+		UINT64 FrameTime = Time + Index * Freq / SampleRate;
+		UINT64 Offset = gPausePrunedTotal;
+		UINT32 Next = Count;
+		BOOL Skip = FALSE;
+
+		for (int i = 0; i < gPauseCount; i++)
+		{
+			const PauseRange* Range = &gPauseRanges[i];
+			if (FrameTime < Range->Begin)
+			{
+				// encode only up to start of next pause
+				Next = AudioFrameIndexAt(Time, Count, Range->Begin);
+				break;
+			}
+			if (FrameTime < Range->End)
+			{
+				// skip up to end of this pause
+				Next = Range->End == UINT64_MAX ? Count : AudioFrameIndexAt(Time, Count, Range->End);
+				Skip = TRUE;
+				break;
+			}
+			Offset += Range->End - Range->Begin;
+		}
+		Assert(Next > Index);
+
+		if (!Skip)
+		{
+			Encoder_NewSamples(&gEncoder, Samples ? Samples + Index * BytesPerFrame : NULL, Next - Index, FrameTime - Offset, Freq);
+		}
+		Index = Next;
+	}
+}
+
+// screen rectangle of what is recorded for window or monitor capture, FALSE if it is not visible
+static BOOL GetRecordedScreenRect(RECT* Result)
+{
+	if (gCapture.Window)
+	{
+		if (IsIconic(gCapture.Window))
+		{
+			return FALSE;
+		}
+
+		RECT WindowRect;
+		if (FAILED(DwmGetWindowAttribute(gCapture.Window, DWMWA_EXTENDED_FRAME_BOUNDS, &WindowRect, sizeof(WindowRect))))
+		{
+			return FALSE;
+		}
+
+		RECT Rect = CropRect(ScreenCapture__GetRect(&gCapture, WindowRect.right - WindowRect.left, WindowRect.bottom - WindowRect.top));
+		OffsetRect(&Rect, WindowRect.left, WindowRect.top);
+		*Result = Rect;
+	}
+	else
+	{
+		MONITORINFO Info = { .cbSize = sizeof(Info) };
+		if (!GetMonitorInfoW(gRecordingMonitor, &Info))
+		{
+			return FALSE;
+		}
+		*Result = Info.rcMonitor;
+	}
+	return !IsRectEmpty(Result);
+}
+
+static void ShowOverlay(RECT Rect)
+{
+	SetWindowPos(gOverlay, HWND_TOPMOST, Rect.left, Rect.top, Rect.right - Rect.left, Rect.bottom - Rect.top, SWP_SHOWWINDOW | SWP_NOACTIVATE);
+	InvalidateRect(gOverlay, NULL, FALSE);
+}
+
+static void HideOverlay(void)
+{
+	SetWindowPos(gOverlay, NULL, 0, 0, 0, 0, SWP_HIDEWINDOW | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+}
+
+// "Paused" label is drawn inside recorded area, so it is shown only when it cannot get into recording
+static BOOL CanShowPausedLabel(void)
+{
+	// window capture never includes other windows on top of it
+	return gCapture.Window != NULL || gOverlayExcluded;
+}
+
+// shows red border around recorded area when paused, region capture shows its own border all the time
+static void UpdatePauseOverlay(void)
+{
+	if (gRecordingRegion)
+	{
+		InvalidateRect(gOverlay, NULL, FALSE);
+		return;
+	}
+
+	RECT Rect;
+	BOOL Show = gPaused && GetRecordedScreenRect(&Rect);
+	if (Show)
+	{
+		// border goes outside of recorded area, but keep it on screen for maximized windows & monitor capture
+		InflateRect(&Rect, WCAP_RECT_BORDER + 1, WCAP_RECT_BORDER + 1);
+		MONITORINFO Info = { .cbSize = sizeof(Info) };
+		GetMonitorInfoW(MonitorFromRect(&Rect, MONITOR_DEFAULTTONEAREST), &Info);
+		IntersectRect(&Rect, &Rect, &Info.rcMonitor);
+
+		// border inside monitor capture would get recorded, if it cannot be excluded from capture
+		Show = !IsRectEmpty(&Rect) && (gCapture.Window != NULL || gOverlayExcluded);
+	}
+
+	if (Show)
+	{
+		RECT Current;
+		GetWindowRect(gOverlay, &Current);
+		if (!IsWindowVisible(gOverlay) || !EqualRect(&Current, &Rect))
+		{
+			ShowOverlay(Rect);
+		}
+		else
+		{
+			// stay above recorded window, in case it is topmost too and got activated
+			SetWindowPos(gOverlay, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+		}
+	}
+	else if (IsWindowVisible(gOverlay))
+	{
+		HideOverlay();
+	}
+}
+
 static void StartRecording(ID3D11Device* Device, HWND Window)
 {
 	SYSTEMTIME Time;
@@ -354,6 +563,14 @@ static void StartRecording(ID3D11Device* Device, HWND Window)
 	gRecordingNextEncode = 0;
 	gRecordingLastFrame = 0;
 	gRecordingDroppedFrames = 0;
+	gRecordingRegion = FALSE;
+	gRecordingMonitor = NULL;
+
+	gPaused = FALSE;
+	gPauseCount = 0;
+	gPausePrunedTotal = 0;
+	gPauseHeldFrame = FALSE;
+	gPauseHeldPending = FALSE;
 	ScreenCapture_Start(&gCapture, gConfig.MouseCursor, gConfig.ShowRecordingBorder, gConfig.IncludeSecondaryWindows);
 
 	if (gConfig.CaptureAudio)
@@ -408,7 +625,7 @@ static void EncodeCapturedAudio(void)
 		if (FramesToEncode != 0)
 		{
 			Assert(Data.Time >= gEncoder.StartTime);
-			Encoder_NewSamples(&gEncoder, Data.Samples, FramesToEncode, Data.Time, gTickFreq.QuadPart);
+			EncodeAudioFrames(Data.Samples, FramesToEncode, Data.Time);
 		}
 		AudioCapture_ReleaseData(&gAudio, &Data);
 	}
@@ -435,11 +652,68 @@ static void StopRecording(void)
 		ShowFileInFolder(gRecordingPath);
 	}
 
-	SetWindowPos(gWindow, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_HIDEWINDOW | SWP_NOMOVE | SWP_NOSIZE);
-	SetWindowLongW(gWindow, GWL_EXSTYLE, 0);
+	gPaused = FALSE;
+	gRecordingRegion = FALSE;
+	HideOverlay();
 
 	UpdateTrayIcon(gIcon1);
 	UpdateTrayTitle(WCAP_TITLE);
+}
+
+static void TogglePause(void)
+{
+	if (gEncoder.StartTime == 0)
+	{
+		// first frame is not received yet
+		return;
+	}
+
+	LARGE_INTEGER Now;
+	QueryPerformanceCounter(&Now);
+	UINT64 Time = Now.QuadPart;
+
+	if (!gPaused)
+	{
+		// forget old ranges that cannot affect any more incoming audio or video data
+		const UINT64 Keep = WCAP_PAUSE_KEEP_SEC * gTickFreq.QuadPart;
+		int Prune = 0;
+		while (Prune < gPauseCount && gPauseRanges[Prune].End + Keep < Time)
+		{
+			gPausePrunedTotal += gPauseRanges[Prune].End - gPauseRanges[Prune].Begin;
+			Prune++;
+		}
+		gPauseCount -= Prune;
+		MoveMemory(gPauseRanges, gPauseRanges + Prune, gPauseCount * sizeof(gPauseRanges[0]));
+
+		if (gPauseCount == WCAP_PAUSE_MAX_RANGES)
+		{
+			return;
+		}
+
+		gPauseRanges[gPauseCount++] = (PauseRange){ Time, UINT64_MAX };
+		gPaused = TRUE;
+
+		// if held frame from previous pause is not encoded yet, then keep it
+		gPauseHeldFrame = gPauseHeldPending;
+		gPauseHeldPending = FALSE;
+	}
+	else
+	{
+		gPauseRanges[gPauseCount - 1].End = Time;
+		gPaused = FALSE;
+		gPauseResumeTime = Time;
+
+		// if frames changed while paused, last one will be encoded after resume, unless newer frame arrives first
+		gPauseHeldPending = gPauseHeldFrame;
+		gPauseHeldFrame = FALSE;
+
+		// restart framerate limiting, otherwise it would try to catch up with paused time
+		gRecordingNextEncode = 0;
+	}
+
+	UpdateTrayIcon(gPaused ? gIcon3 : gIcon2);
+	SendMessageW(gWindow, WM_WCAP_TRAY_TITLE, 0, 0);
+	UpdatePauseOverlay();
 }
 
 static ID3D11Device* CreateDevice(void)
@@ -573,6 +847,10 @@ static void CaptureMonitor(void)
 	}
 
 	StartRecording(Device, NULL);
+	if (gRecording)
+	{
+		gRecordingMonitor = Monitor;
+	}
 }
 
 static void CaptureRegionInit(void)
@@ -694,10 +972,6 @@ static void CaptureRegion(void)
 		.bottom = gRectSelection[1].y,
 	};
 
-	LONG ExStyle = WS_EX_LAYERED | WS_EX_TRANSPARENT;
-	SetWindowLongW(gWindow, GWL_EXSTYLE, ExStyle);
-	SetLayeredWindowAttributes(gWindow, RGB(255, 0, 255), 0, LWA_COLORKEY);
-
 	ID3D11Device* Device = CreateDevice();
 	if (!Device)
 	{
@@ -716,12 +990,13 @@ static void CaptureRegion(void)
 
 	if (gRecording)
 	{
-		int X = Info.rcMonitor.left + Rect.left - (WCAP_RECT_BORDER + 1);
-		int Y = Info.rcMonitor.top + Rect.top - (WCAP_RECT_BORDER + 1);
-		int W = Rect.right - Rect.left + 2 * (WCAP_RECT_BORDER + 1);
-		int H = Rect.bottom - Rect.top + 2 * (WCAP_RECT_BORDER + 1);
-		SetWindowPos(gWindow, HWND_TOPMOST, X, Y, W, H, SWP_SHOWWINDOW);
-		InvalidateRect(gWindow, NULL, FALSE);
+		gRecordingRegion = TRUE;
+
+		// border is drawn around recorded region
+		RECT Border = Rect;
+		OffsetRect(&Border, Info.rcMonitor.left, Info.rcMonitor.top);
+		InflateRect(&Border, WCAP_RECT_BORDER + 1, WCAP_RECT_BORDER + 1);
+		ShowOverlay(Border);
 	}
 	else
 	{
@@ -776,6 +1051,7 @@ void DisableHotKeys(void)
 	UnregisterHotKey(gWindow, HOT_RECORD_MONITOR);
 	UnregisterHotKey(gWindow, HOT_RECORD_WINDOW);
 	UnregisterHotKey(gWindow, HOT_RECORD_REGION);
+	UnregisterHotKey(gWindow, HOT_PAUSE);
 }
 
 BOOL EnableHotKeys(void)
@@ -792,6 +1068,10 @@ BOOL EnableHotKeys(void)
 	if (gConfig.ShortcutRegion)
 	{
 		Success = Success && RegisterHotKey(gWindow, HOT_RECORD_REGION, HOT_GET_MOD(gConfig.ShortcutRegion), HOT_GET_KEY(gConfig.ShortcutRegion));
+	}
+	if (gConfig.ShortcutPause)
+	{
+		Success = Success && RegisterHotKey(gWindow, HOT_PAUSE, HOT_GET_MOD(gConfig.ShortcutPause), HOT_GET_KEY(gConfig.ShortcutPause));
 	}
 	return Success;
 }
@@ -1035,9 +1315,31 @@ static LRESULT CALLBACK WindowProc(HWND Window, UINT Message, WPARAM WParam, LPA
 			}
 			else if (WParam == WCAP_VIDEO_UPDATE_TIMER)
 			{
-				LARGE_INTEGER Time;
-				QueryPerformanceCounter(&Time);
-				Encoder_Update(&gEncoder, Time.QuadPart, gTickFreq.QuadPart);
+				if (gPaused)
+				{
+					// no stream ticks while paused, only keep border following recorded window
+					UpdatePauseOverlay();
+					return 0;
+				}
+
+				UINT64 Time;
+				if (gPauseHeldPending)
+				{
+					// no new frames since resume, encode last frame captured while paused
+					gPauseHeldPending = FALSE;
+					PauseMapTime(gPauseResumeTime, &Time);
+					if (!Encoder_SubmitHeldFrame(&gEncoder, Time, gTickFreq.QuadPart))
+					{
+						gRecordingDroppedFrames++;
+					}
+				}
+
+				LARGE_INTEGER Now;
+				QueryPerformanceCounter(&Now);
+				if (PauseMapTime(Now.QuadPart, &Time))
+				{
+					Encoder_Update(&gEncoder, Time, gTickFreq.QuadPart);
+				}
 				return 0;
 			}
 		}
@@ -1075,6 +1377,12 @@ static LRESULT CALLBACK WindowProc(HWND Window, UINT Message, WPARAM WParam, LPA
 
 			AppendMenuW(Menu, MF_STRING, CMD_WCAP, WCAP_TITLE);
 			AppendMenuW(Menu, MF_SEPARATOR, 0, NULL);
+			if (gRecording)
+			{
+				AppendMenuW(Menu, MF_STRING | (gEncoder.StartTime == 0 ? MF_DISABLED : 0), CMD_PAUSE, gPaused ? L"Resume Recording" : L"Pause Recording");
+				AppendMenuW(Menu, MF_STRING, CMD_STOP, L"Stop Recording");
+				AppendMenuW(Menu, MF_SEPARATOR, 0, NULL);
+			}
 			AppendMenuW(Menu, MF_STRING | (gRecording ? MF_DISABLED : 0), CMD_SETTINGS, L"Settings");
 			AppendMenuW(Menu, MF_STRING, CMD_QUIT, L"Exit");
 
@@ -1090,6 +1398,20 @@ static LRESULT CALLBACK WindowProc(HWND Window, UINT Message, WPARAM WParam, LPA
 			else if (Command == CMD_QUIT)
 			{
 				DestroyWindow(Window);
+			}
+			else if (Command == CMD_PAUSE)
+			{
+				if (gRecording)
+				{
+					TogglePause();
+				}
+			}
+			else if (Command == CMD_STOP)
+			{
+				if (gRecording)
+				{
+					StopRecording();
+				}
 			}
 			else if (Command == CMD_SETTINGS)
 			{
@@ -1124,7 +1446,14 @@ static LRESULT CALLBACK WindowProc(HWND Window, UINT Message, WPARAM WParam, LPA
 	}
 	else if (Message == WM_HOTKEY)
 	{
-		if (gRecording)
+		if (WParam == HOT_PAUSE)
+		{
+			if (gRecording)
+			{
+				TogglePause();
+			}
+		}
+		else if (gRecording)
 		{
 			StopRecording();
 		}
@@ -1169,7 +1498,8 @@ static LRESULT CALLBACK WindowProc(HWND Window, UINT Message, WPARAM WParam, LPA
 			StrFormatByteSizeW(FileSize, SizeText, _countof(SizeText));
 
 			WCHAR Text[1024];
-			StrFormat(Text, L"Recording: %dx%d @ %.2f\nLength: %ls\nBitrate: %u kbit/s\nSize: %ls\nFramedrop: %u",
+			StrFormat(Text, L"%ls: %dx%d @ %.2f\nLength: %ls\nBitrate: %u kbit/s\nSize: %ls\nFramedrop: %u",
+				gPaused ? L"Paused" : L"Recording",
 				gEncoder.OutputWidth, gEncoder.OutputHeight,
 				(float)gEncoder.FramerateNum / (float)gEncoder.FramerateDen,
 				LengthText,
@@ -1334,29 +1664,85 @@ static LRESULT CALLBACK WindowProc(HWND Window, UINT Message, WPARAM WParam, LPA
 					}
 				}
 			}
-			else
-			{
-				RECT Rect;
-				GetClientRect(Window, &Rect);
+			EndBufferedPaint(BufferedPaint, TRUE);
+		}
 
-				HBRUSH BorderBrush = CreateSolidBrush(RGB(255, 255, 0));
-				Assert(BorderBrush);
-				FillRect(Context, &Rect, BorderBrush);
-				DeleteObject(BorderBrush);
+		EndPaint(Window, &Paint);
+		return 0;
+	}
 
-				Rect.left += WCAP_RECT_BORDER;
-				Rect.top += WCAP_RECT_BORDER;
-				Rect.right -= WCAP_RECT_BORDER;
-				Rect.bottom -= WCAP_RECT_BORDER;
+	return DefWindowProcW(Window, Message, WParam, LParam);
+}
 
-				HBRUSH ColorKeyBrush = CreateSolidBrush(RGB(255, 0, 255));
-				Assert(ColorKeyBrush);
-				FillRect(Context, &Rect, ColorKeyBrush);
-				DeleteObject(ColorKeyBrush);
+// recording border: yellow while recording, red with "Paused" label while paused, inside is transparent
+static void PaintRecordingBorder(HWND Window, HDC Context)
+{
+	RECT Rect;
+	GetClientRect(Window, &Rect);
 
-				FrameRect(Context, &Rect, GetStockObject(BLACK_BRUSH));
-			}
+	COLORREF BorderColor = gPaused ? WCAP_BORDER_COLOR_PAUSED : WCAP_BORDER_COLOR_RECORDING;
+	HBRUSH BorderBrush = CreateSolidBrush(BorderColor);
+	Assert(BorderBrush);
+	FillRect(Context, &Rect, BorderBrush);
 
+	Rect.left += WCAP_RECT_BORDER;
+	Rect.top += WCAP_RECT_BORDER;
+	Rect.right -= WCAP_RECT_BORDER;
+	Rect.bottom -= WCAP_RECT_BORDER;
+
+	HBRUSH ColorKeyBrush = CreateSolidBrush(WCAP_COLOR_KEY);
+	Assert(ColorKeyBrush);
+	FillRect(Context, &Rect, ColorKeyBrush);
+	DeleteObject(ColorKeyBrush);
+
+	FrameRect(Context, &Rect, GetStockObject(BLACK_BRUSH));
+
+	if (gPaused && CanShowPausedLabel())
+	{
+		// label attached to inner top-left corner of border, on opaque background so
+		// antialiased text edges do not blend with transparent color key
+		const WCHAR Text[] = L"Paused";
+		const int TextLength = _countof(Text) - 1;
+		const int PadX = 6;
+		const int PadY = 1;
+
+		SelectObject(Context, gFontBold);
+		SIZE Size;
+		GetTextExtentPoint32W(Context, Text, TextLength, &Size);
+
+		RECT Label = { Rect.left, Rect.top, Rect.left + Size.cx + 2 * PadX, Rect.top + Size.cy + 2 * PadY };
+		IntersectRect(&Label, &Label, &Rect);
+		FillRect(Context, &Label, BorderBrush);
+
+		SetTextAlign(Context, TA_TOP | TA_LEFT);
+		SetTextColor(Context, RGB(255, 255, 255));
+		SetBkMode(Context, TRANSPARENT);
+		ExtTextOutW(Context, Label.left + PadX, Label.top + PadY, ETO_CLIPPED, &Label, Text, TextLength, NULL);
+	}
+
+	DeleteObject(BorderBrush);
+}
+
+static LRESULT CALLBACK OverlayProc(HWND Window, UINT Message, WPARAM WParam, LPARAM LParam)
+{
+	if (Message == WM_ERASEBKGND)
+	{
+		return 1;
+	}
+	else if (Message == WM_NCHITTEST)
+	{
+		return HTTRANSPARENT;
+	}
+	else if (Message == WM_PAINT)
+	{
+		PAINTSTRUCT Paint;
+		HDC PaintContext = BeginPaint(Window, &Paint);
+
+		HDC Context;
+		HPAINTBUFFER BufferedPaint = BeginBufferedPaint(PaintContext, &Paint.rcPaint, BPBF_COMPATIBLEBITMAP, NULL, &Context);
+		if (BufferedPaint)
+		{
+			PaintRecordingBorder(Window, Context);
 			EndBufferedPaint(BufferedPaint, TRUE);
 		}
 
@@ -1372,6 +1758,27 @@ static bool OnCaptureFrame(ScreenCapture* Capture, ScreenCaptureFrame* Frame)
 	if (Frame == NULL)
 	{
 		PostMessageW(gWindow, WM_WCAP_STOP_CAPTURE, 0, 0);
+		return true;
+	}
+
+	UINT64 Time;
+	if (!PauseMapTime(Frame->Time, &Time))
+	{
+		// frame captured while paused, keep it to encode after resume in case no newer frame arrives
+		if (Frame->Time > gRecordingLastFrame)
+		{
+			gRecordingLastFrame = Frame->Time;
+			Encoder_HoldFrame(&gEncoder, Frame->Texture, CropRect(Frame->Rect));
+			if (gPaused)
+			{
+				gPauseHeldFrame = TRUE;
+			}
+			else
+			{
+				// late frame from pause that has already ended
+				gPauseHeldPending = TRUE;
+			}
+		}
 		return true;
 	}
 
@@ -1402,7 +1809,9 @@ static bool OnCaptureFrame(ScreenCapture* Capture, ScreenCaptureFrame* Frame)
 
 	if (DoEncode)
 	{
-		if (!Encoder_NewFrame(&gEncoder, Frame->Texture, CropRect(Frame->Rect), Frame->Time, gTickFreq.QuadPart))
+		// newer frame replaces one held from pause
+		gPauseHeldPending = FALSE;
+		if (!Encoder_NewFrame(&gEncoder, Frame->Texture, CropRect(Frame->Rect), Time, gTickFreq.QuadPart))
 		{
 			// TODO: maybe highlight tray icon when droppped frames are increasing too much?
 			gRecordingDroppedFrames++;
@@ -1415,7 +1824,7 @@ static bool OnCaptureFrame(ScreenCapture* Capture, ScreenCaptureFrame* Frame)
 
 		if (gConfig.EnableLimitLength)
 		{
-			if (Frame->Time - gEncoder.StartTime >= (UINT64)(gConfig.LimitLength * gTickFreq.QuadPart))
+			if (Time - gEncoder.StartTime >= (UINT64)(gConfig.LimitLength * gTickFreq.QuadPart))
 			{
 				Stop = TRUE;
 			}
@@ -1516,7 +1925,8 @@ void WinMainCRTStartup()
 
 	gIcon1 = LoadIconW(WindowClass.hInstance, MAKEINTRESOURCEW(1));
 	gIcon2 = LoadIconW(WindowClass.hInstance, MAKEINTRESOURCEW(2));
-	Assert(gIcon1 && gIcon2);
+	gIcon3 = LoadIconW(WindowClass.hInstance, MAKEINTRESOURCEW(3));
+	Assert(gIcon1 && gIcon2 && gIcon3);
 
 	WM_TASKBARCREATED = RegisterWindowMessageW(L"TaskbarCreated");
 	Assert(WM_TASKBARCREATED);
@@ -1532,6 +1942,27 @@ void WinMainCRTStartup()
 	{
 		ExitProcess(0);
 	}
+
+	// separate window for recording border, because main window cannot reliably be made topmost while recording
+	WNDCLASSEXW OverlayClass =
+	{
+		.cbSize = sizeof(OverlayClass),
+		.lpfnWndProc = OverlayProc,
+		.hInstance = WindowClass.hInstance,
+		.lpszClassName = L"wcap_overlay_class",
+	};
+	Atom = RegisterClassExW(&OverlayClass);
+	Assert(Atom);
+
+	gOverlay = CreateWindowExW(
+		WS_EX_TOPMOST | WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+		OverlayClass.lpszClassName, WCAP_TITLE, WS_POPUP,
+		0, 0, 0, 0, NULL, NULL, WindowClass.hInstance, NULL);
+	Assert(gOverlay);
+	SetLayeredWindowAttributes(gOverlay, WCAP_COLOR_KEY, 0, LWA_COLORKEY);
+
+	// available since Windows 10 version 2004, otherwise "Paused" label is not shown for monitor & region capture
+	gOverlayExcluded = SetWindowDisplayAffinity(gOverlay, WDA_EXCLUDEFROMCAPTURE);
 	if (!EnableHotKeys())
 	{
 		MessageBoxW(NULL,
